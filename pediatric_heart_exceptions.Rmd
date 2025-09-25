@@ -1,0 +1,2830 @@
+---
+title: "BTT_LVAD"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(knitr)
+opts_chunk$set(comment = NA, prompt = FALSE, cache = FALSE, echo = TRUE,
+                      results = "asis")
+
+library(tidyverse)
+library(haven)
+library(rmdformats)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gtsummary)
+library(cowplot)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(cmprsk)
+library(tidycmprsk)
+
+```
+
+```{r color_schemes}
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+custom_col <- function(...) {
+  cols <- c(...)
+  if (is.null(cols))
+    return (drsimonj_colors)
+  custom_colors[cols]
+}
+custom_palettes <- list(
+  `main`  = custom_col("green", "yellow", "dark red"),
+  `cool`  = custom_col("green", "yellow","orange"),
+  `hot`   = custom_col("yellow", "dark red", "sandy brown"),
+  `simple` = custom_col("yellow", "dark red"),
+  `reallysimple` = custom_col("white", "#00a1d5"),
+  `mixed` = custom_col("green", "yellow", "orange", "bright red", "dark red"),
+  `distinct` = custom_col("dark red", "bright red", "light yellow", "green","grey"),
+  `distinct1` = custom_col("dark red", "bright red",  "green","light yellow","grey"), 
+  `bar` = custom_col("green", "grey", "yellow", "orange", "bright red", "dark red"),
+  `treatment` = custom_col("dark red","green", "space sparkle", "orange", "violet","yellow","sandy brown","bright red"),
+  `exception` = custom_col("dark red", "yellow"),
+  `agegroup` = custom_col("bright red", "orange", "yellow", "grey")
+)
+custom_pal <- function(palette = "main", reverse = FALSE, ...) {
+  pal <- custom_palettes[[palette]]
+  if (reverse) pal <- rev(pal)
+  colorRampPalette(pal, ...)
+}
+scale_color_custom <- function(palette = "mixed", discrete = TRUE, reverse = FALSE, ...) {
+  pal <- custom_pal(palette = palette, reverse = reverse)
+  if (discrete) {
+    discrete_scale("colour", paste0("custom_", palette), palette = pal, ...)
+  } else {
+    scale_color_gradientn(colours = pal(256), ...)
+  }
+}
+scale_fill_custom <- function(palette = "mixed", discrete = TRUE, reverse = FALSE, ...) {
+  pal <- custom_pal(palette = palette, reverse = reverse)
+  if (discrete) {
+    discrete_scale("fill", paste0("custom_", palette), palette = pal, ...)
+  } else {
+    scale_fill_gradientn(colours = pal(256), ...)
+  }
+}
+
+```
+
+
+# Filter and pivot data by relevant dates
+
+
+
+
+``` {r data cleaning}
+
+
+tx_list <- thoracic_followup_data_2025q2 %>% select(TRR_ID_CODE, PT_CODE, PX_STAT, PX_STAT_DATE) %>% 
+  group_by(TRR_ID_CODE) %>% filter(PX_STAT == "A" | PX_STAT == "D" | PX_STAT == "R") %>% arrange(PX_STAT_DATE) %>%
+  filter(row_number() == n())
+
+
+cand_list = thoracic_data_2025q2 %>% select(PT_CODE, WL_ID_CODE, TRR_ID_CODE, INIT_DATE, INIT_STAT, COMPOSITE_DEATH_DATE, INIT_AGE, WL_ORG, END_DATE, REM_CD, LISTING_CTR_CODE, END_STAT, GENDER, ABO, THORACIC_DGN, TCR_DGN, ETHNICITY, ETHCAT, BMI_TCR, BMI_CALC, ECMO_TCR, IABP_TCR, INOTROPES_TCR, VAD_DEVICE_TY_TCR, VENTILATOR_TCR, INIT_WGT_KG_CALC, REGION) %>% 
+  filter(INIT_AGE < 18) %>% filter(WL_ORG == "HR") %>% 
+  filter(INIT_DATE >= mdy("03-22-2016") & INIT_DATE <= mdy("03-31-2025")) %>%
+  mutate(
+    period = case_when(
+      INIT_DATE >= mdy("07-01-2017") & INIT_DATE <= mdy("03-31-2021") ~ "pre-nhrb",
+      INIT_DATE >= mdy("07-01-2021") & INIT_DATE <= mdy("03-31-2025") ~ "post-nhrb",
+      TRUE ~ "other"),
+    initial_status = case_when(
+      grepl("2010", INIT_STAT) ~ "1A",
+      grepl("2020", INIT_STAT) ~ "1B",
+      grepl("2030", INIT_STAT) ~ "2",
+      grepl("2999", INIT_STAT) ~ "Inactive"),
+    TX_DATE = ifelse(REM_CD == 4, END_DATE, NA),
+    TX_DATE = as.Date(TX_DATE, origin = "1970-01-01")) %>% filter(initial_status != "Inactive")  
+
+
+#split data into single and multiple registrations
+single_registrations = cand_list %>% 
+  group_by(PT_CODE) %>%
+  filter(n() == 1)
+
+multiple_registrations = cand_list %>%
+  group_by(PT_CODE) %>%
+  filter(n() > 1)
+
+
+#distinguish type of multiple registration (concurrents must be collapsed into single listing)
+multiple_registrations = multiple_registrations %>% arrange(INIT_DATE) %>%
+  mutate(list_type = case_when(
+    INIT_DATE < dplyr::lag(END_DATE) ~ "concurrent",
+    END_DATE > dplyr::lead(INIT_DATE) ~ "concurrent",
+    TRUE ~ "sequential")) 
+
+multiple_registrations = multiple_registrations[order(multiple_registrations$PT_CODE, multiple_registrations$END_DATE), ]
+
+ 
+multiple_registrations$transplant_num <- 1 
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      !is.na(multiple_registrations$TX_DATE[i-1]) && 
+      !is.na(multiple_registrations$TX_DATE[i]) &&
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      multiple_registrations$TX_DATE[i-1] != multiple_registrations$TX_DATE[i]) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1] + 1
+  }
+}
+
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      !is.na(multiple_registrations$transplant_num[i-1]) && 
+      multiple_registrations$transplant_num[i-1] != multiple_registrations$transplant_num[i] &&
+      multiple_registrations$transplant_num[i-1] != 1) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1]
+  }
+}
+
+multiple_registrations$transplant_num[multiple_registrations$list_type == 'sequential'] <- 0 
+
+for(i in 1:(nrow(multiple_registrations)-1)) { 
+  if(multiple_registrations$PT_CODE[i] == multiple_registrations$PT_CODE[i+1] &
+     multiple_registrations$list_type[i] == 'concurrent' & multiple_registrations$list_type[i+1] == 'concurrent' &
+     !is.na(multiple_registrations$TX_DATE[i]) & !is.na(multiple_registrations$TX_DATE[i+1]) &
+     multiple_registrations$TX_DATE[i] < multiple_registrations$TX_DATE[i+1] ) {
+    
+    multiple_registrations$TX_DATE[i] <- multiple_registrations$TX_DATE[i+1] ##if PERS_ID is the same as the NEXT row, both have concurrent listings, transplant dates for both are not NA, and transplant date is earlier than the next row's transplant date - update to next row's transplant date
+  }}
+
+
+sequential_lists <- multiple_registrations %>%
+  filter(list_type == "sequential") %>%
+  mutate(min_list_date = INIT_DATE)  
+
+multiple_registrations <- multiple_registrations %>% 
+  group_by(PT_CODE, transplant_num) %>%
+  mutate(min_list_date = min(INIT_DATE, na.rm=T))
+
+multiple_registrations <- multiple_registrations %>% mutate
+max_retransplants <- max(multiple_registrations$transplant_num) 
+
+collapsed_concurrent_registrations <- NULL 
+for(i in 1:max_retransplants) {
+  collapsed_concurrent_registrations <- rbind(collapsed_concurrent_registrations, 
+        
+  multiple_registrations %>%
+    filter(list_type == "concurrent" & transplant_num == i) %>% 
+    mutate(last_wait_date = max(END_DATE, na.rm = TRUE)) %>% 
+    fill(TX_DATE, .direction = "up") %>%
+    fill(REM_CD, .direction = "up") %>%
+    select(-c(END_DATE, INIT_DATE)) %>%
+    filter(row_number() == 1) %>%  
+    mutate(last_wait_date = case_when(
+      TX_DATE < last_wait_date ~ TX_DATE,
+      TRUE ~ last_wait_date)))}
+
+##recombine separated data frames
+
+#recombined data
+cand_list <- bind_rows(single_registrations %>% ungroup(), 
+                       sequential_lists %>% ungroup(), 
+                       collapsed_concurrent_registrations %>% ungroup()) 
+
+#fix listing date 
+cand_list = cand_list %>% 
+  mutate(
+    min_list_date = if_else(is.na(min_list_date), as.Date(INIT_DATE), as.Date(min_list_date)))
+
+
+cand_hx_list = cand_list %>% 
+  mutate(INIT_DATE = ifelse(is.na(INIT_DATE), min_list_date, INIT_DATE),
+         END_DATE = ifelse(is.na(END_DATE), last_wait_date, END_DATE),
+         INIT_DATE = as.Date(INIT_DATE, origin = "1970-01-01"),
+         END_DATE = as.Date(END_DATE, origin = "1970-01-01")) %>%
+  select(-list_type, -transplant_num, -min_list_date, -last_wait_date) %>% 
+  left_join(thoracic_wlhistory_data_2025q2 %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD), by = "WL_ID_CODE") %>%
+  group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  mutate(
+    STATUS = case_when(
+      grepl("2010", UNOS_CAND_STAT_CD) ~ "1A",
+      grepl("2020", UNOS_CAND_STAT_CD) ~ "1B",
+      grepl("2030", UNOS_CAND_STAT_CD) ~ "2",
+      grepl("2999", UNOS_CAND_STAT_CD) ~ "Inactive")) %>%
+  filter(row_number() > 1) %>% distinct(WL_ID_CODE, CHG_DATE, .keep_all = TRUE) 
+   
+
+status1ajustifications = thoracic_stat1a %>% 
+  mutate(RequestedCandStatCd = 2010,
+         EXCEPTION = REQ6_CRITERIA_NOT_MET) %>%
+  select(WL_ID_CODE, EXCEPTION, UPGRADE_EXTDATE, RequestedCandStatCd) 
+
+
+status1bjustifications = thoracic_stat1b %>% 
+  mutate(RequestedCandStatCd = 2020,
+         EXCEPTION = REQ3_CRITERIA_NOT_MET) %>%
+  select(WL_ID_CODE, EXCEPTION, UPGRADE_EXTDATE, RequestedCandStatCd) 
+
+ 
+status_exception_justifications = rbind(status1ajustifications, status1bjustifications)
+
+
+total_exceptions = cand_list %>% left_join(status_exception_justifications, by = "WL_ID_CODE")
+
+
+
+cand_hx_list_episodes = cand_hx_list %>% left_join(status_exception_justifications, by = "WL_ID_CODE") %>%
+  mutate(
+    matching = ifelse(UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == UPGRADE_EXTDATE, 1, 0),
+    matching = ifelse(is.na(matching), 0, matching))
+
+cand_hx_list_episodes1 = cand_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(matching == 1)
+
+cand_hx_list_episodes2 = cand_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(matching == 0) %>% slice(1)
+
+
+cand_hx_list_episodes = rbind(cand_hx_list_episodes1, cand_hx_list_episodes2) %>% ungroup() %>%
+  mutate(
+    UPGRADE_EXTDATE = ifelse(matching == 0, NA, UPGRADE_EXTDATE),
+    UPGRADE_EXTDATE = as.Date(UPGRADE_EXTDATE, origin = "1970-01-01"),
+    RequestedCandStatCd = ifelse(matching == 0, NA, RequestedCandStatCd),
+    EXCEPTION = ifelse(matching == 0, NA, EXCEPTION)) %>% distinct()
+
+duplicated_rows_1 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() == 1) %>% arrange(CHG_DATE) %>% ungroup()
+
+duplicated_rows_2 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() == 2) %>% arrange(CHG_DATE) %>% filter(matching == 1) %>% ungroup()
+
+duplicated_rows_3 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() > 2) %>% arrange(CHG_DATE) %>% filter(CHG_TY != "D") %>% 
+  filter(matching == 1) %>% arrange(UNOS_CAND_STAT_CD) %>% 
+  mutate(
+    has_exc = case_when(
+      any(EXCEPTION == 1) ~ 1,
+      TRUE ~ 0))
+
+duplicated_rows_3.1 = duplicated_rows_3 %>% filter(has_exc == 1) %>% filter(EXCEPTION == 1) %>% 
+  select(-has_exc) %>% ungroup()
+
+duplicated_rows_3.2 = duplicated_rows_3 %>% filter(has_exc == 0) %>% arrange(UNOS_CAND_STAT_CD) %>% 
+  slice(1) %>% select(-has_exc) %>% ungroup()
+  
+cand_hx_list_episodes = rbind(duplicated_rows_1, duplicated_rows_2, duplicated_rows_3.1, duplicated_rows_3.2) %>% 
+  group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, CHG_DATE) %>% filter(CHG_TY != "D") %>%
+  mutate(
+    index_of_exception = which(EXCEPTION == 1) [1],
+    CHG_END_DATE = dplyr::lead(CHG_DATE),
+    CHG_END_DATE = ifelse(is.na(CHG_END_DATE), END_DATE, CHG_END_DATE),
+    CHG_END_DATE = as.Date(CHG_END_DATE, origin = "1970-01-01"),
+    start = as.numeric(difftime(CHG_DATE, INIT_DATE, units = "days")),
+    end = as.numeric(difftime(CHG_END_DATE, INIT_DATE, units = "days")),
+    EXCEPTION = ifelse(is.na(EXCEPTION), 0, EXCEPTION)) %>%
+  filter(!(row_number() == n() & last(CHG_END_DATE) %in% head(CHG_END_DATE, -1))) %>%
+  filter(CHG_END_DATE > CHG_DATE) %>%
+  mutate(
+    is_last_row = row_number() == n(),
+    death = case_when(
+      is_last_row == TRUE & (REM_CD == 8 | REM_CD == 13) ~ 1,
+      TRUE ~ 0),
+    transplant = case_when(
+      is_last_row == TRUE & REM_CD == 4 ~ 1,
+      TRUE ~ 0),
+    death = ifelse(is.na(death), 0, death),
+    transplant = ifelse(is.na(transplant), 0, transplant)) 
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes %>% 
+  group_by(grp = cumsum(EXCEPTION == 1)) %>% 
+  mutate(numbering = row_number()) %>%
+  mutate(
+    time_since_exception = as.numeric(difftime(CHG_DATE, first(CHG_DATE), units = "days")),
+    new_fill_for_exception = case_when(
+      grp > 0 & first(STATUS) == "1A" & UNOS_CAND_STAT_CD == first(UNOS_CAND_STAT_CD) & time_since_exception <= 14 & WL_ID_CODE == first(WL_ID_CODE) ~ 1,
+      grp > 0 & first(STATUS) == "1B" & UNOS_CAND_STAT_CD == first(UNOS_CAND_STAT_CD) & WL_ID_CODE == first(WL_ID_CODE) ~ 1,
+      TRUE ~ 0),
+    EXCEPTION = ifelse(new_fill_for_exception == 1, 1, EXCEPTION))
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(EXCEPTION = ifelse(STATUS == "Inactive", NA, EXCEPTION)) %>%
+  mutate(STATUS = factor(case_when(
+    !(UNOS_CAND_STAT_CD %in% c(1999, 2999)) ~ STATUS))) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(STATUS, .direction = "down") %>%
+  fill(EXCEPTION, .direction = "down") %>%
+  ungroup()
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(REC_EXCEPTION_EVER = case_when(EXCEPTION == 1 ~ 1)) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(REC_EXCEPTION_EVER, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(REC_EXCEPTION_EVER = tidyr::replace_na(REC_EXCEPTION_EVER, 0))
+
+cand_hx_list_episodes_grouping <- cand_hx_list_episodes_grouping %>%
+  mutate(
+    REC_EXCEPTION_INIT = case_when(
+      EXCEPTION == 1 & start == 0 ~ 1)) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(REC_EXCEPTION_INIT, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(REC_EXCEPTION_INIT = tidyr::replace_na(REC_EXCEPTION_INIT, 0))
+
+cand_hx_list_episodes_grouping <- cand_hx_list_episodes_grouping %>%
+  mutate(
+    REC_EXCEPTION_INIT_EVER = factor(
+      case_when(
+        REC_EXCEPTION_INIT == 1 ~ "Exception at Listing",
+        REC_EXCEPTION_EVER == 1 & REC_EXCEPTION_INIT == 0 ~ "Exception after Listing",
+        TRUE ~ "No Exception"),
+      levels = c("Exception at Listing",
+                 "Exception after Listing",
+                 "No Exception")))
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(
+    STATUS = relevel(STATUS, ref = "2"),
+    EXCEPTION_STATUS = factor(
+      case_when(
+        STATUS == "1A" &
+          EXCEPTION == 0 ~ "Status 1A No Exception",
+        STATUS == "1A" &
+          EXCEPTION == 1 ~ "Status 1A Exception",
+        STATUS == "1B" &
+          EXCEPTION == 0 ~ "Status 1B No Exception",
+        STATUS == "1B" &
+          EXCEPTION == 1 ~ "Status 1B Exception",
+        TRUE ~ "Status 2"),
+      levels = c(
+        "Status 1A No Exception",
+        "Status 1A Exception",
+        "Status 1B No Exception",
+        "Status 1B Exception",
+        "Status 2")),
+    EXCEPTION_STATUS = relevel(EXCEPTION_STATUS, ref = "Status 2"))
+
+
+last_observations = cand_hx_list_episodes %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% filter(row_number() == n())
+
+```
+
+
+``` {r fortable1}
+
+fortable1 = cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% slice(1) %>%
+  mutate(
+    sex = ifelse(GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      ETHCAT == 1 ~ "White",
+      ETHCAT == 2 ~ "Black",
+      ETHCAT == 4 ~ "Hispanic/Latino",
+      ETHCAT == 5 ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    REC_EXCEPTION_INIT_EVER = factor(REC_EXCEPTION_INIT_EVER, levels = c("No Exception", "Exception at Listing", "Exception after Listing")),
+    age_group = case_when(
+      INIT_AGE < 1 ~ "< 1",
+      INIT_AGE >= 1 & INIT_AGE < 5 ~ "1-4",
+      INIT_AGE >= 5 & INIT_AGE < 12 ~ "5-11",
+      INIT_AGE >= 12 ~ "> 12"),
+    age_group = factor(age_group, levels = c("< 1", "1-4", "5-11", "> 12")),
+    blood_type = factor(
+      case_when(
+        ABO %in% c("A", "A1", "A2") ~ "A",
+        ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ ABO)),
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    support = case_when(
+      ECMO_TCR == 1 ~ "ECMO",
+      INOTROPES_TCR == 1 ~ "Inotropes",
+      VAD_DEVICE_TY_TCR == 2 | VAD_DEVICE_TY_TCR == 3 | VAD_DEVICE_TY_TCR == 5 ~ "VAD",
+      VENTILATOR_TCR == 1 ~ "Mechanical Ventilation",
+      TRUE ~ NA),
+    support = factor(support, levels = c("ECMO", "VAD", "Inotropes", "Mechanical Ventilation")))
+
+var_label_list <- list(age_group = "Age at Listing (Years)",
+                       sex = "Sex",
+                       race = "Race",
+                       INIT_WGT_KG_CALC = "Weight (Kilograms)",
+                       initial_status = "Status at Initial Listing",
+                       blood_type = "Blood Type",
+                       diagnosis = "Primary Diagnosis",
+                       support = "Support at Listing",
+                       REC_EXCEPTION_INIT_EVER = "Exception Status")
+labelled::var_label(fortable1) <- var_label_list
+
+
+fortable1 %>% ungroup() %>%
+  dplyr::select(
+    age_group, sex, race, INIT_WGT_KG_CALC, blood_type, diagnosis, initial_status, support, REC_EXCEPTION_INIT_EVER) %>%
+  tbl_summary(by = REC_EXCEPTION_INIT_EVER, digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  #remove_row_type(variables = c(pcwp, cardiac_index), type = "missing", level_value = ("(Missing)")) %>%
+  remove_row_type(variables = c(support, INIT_WGT_KG_CALC), type = "missing", level_value = ("(Unknown)")) %>%
+  as_gt()
+
+
+
+
+number <- fortable1 %>% group_by(LISTING_CTR_CODE) %>%
+  summarise(n = n())
+
+fortable1 <- fortable1 %>% left_join(number) %>% ungroup() %>% group_by(LISTING_CTR_CODE) %>% arrange(n, LISTING_CTR_CODE)
+  
+groups = fortable1$LISTING_CTR_CODE %>% unique
+i = 0
+fortable1$center = NA
+for (g in groups) {
+  i = i + 1
+  fortable1[fortable1$LISTING_CTR_CODE == g, ]$center = i
+}
+
+rates <- fortable1 %>% ungroup() %>% group_by(LISTING_CTR_CODE) %>%
+  summarize(
+    prop_applied_exceptions = sum(REC_EXCEPTION_EVER == 1) / n(),
+    number_exceptions = sum(REC_EXCEPTION_EVER == 1),
+    prop_exceptions_whole = sum(REC_EXCEPTION_EVER == 1) / 6026) %>%
+  arrange(-number_exceptions) %>%
+  mutate(Cum = cumsum(number_exceptions)) %>%
+  mutate(CumProp = cumsum(prop_exceptions_whole))
+
+
+median(rates$prop_applied_exceptions)
+
+
+fortable1$REC_EXCEPTION_EVER <- factor(fortable1$REC_EXCEPTION_EVER,
+                                       levels = c(0, 1),
+                                       labels = c("Standard Criteria Listing", "Received Exception"))
+
+#this plot looks at distribution of candidates who have applied for an exception, stratified by center
+centerplot <- ggplot(fortable1, aes(x = center, fill = REC_EXCEPTION_EVER)) +
+  geom_bar(position = "stack", stat = "count", width = 0.8) +
+  theme_classic() +
+  theme(legend.position = "bottom") + 
+  theme(axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  labs(x = "U.S. Transplant Centers", y = "Number of Candidates") +
+  scale_x_continuous(n.breaks = 7) +
+  scale_fill_manual(name = "", values = c("#b8a370", "#660000", "#ae6320", "#C3C1C1")) + 
+  guides(fill = guide_legend(nrow = 2, byrow=TRUE))
+
+
+#set up a chi-square test to see per-center differences
+by_center_data <- fortable1 %>%
+  group_by(LISTING_CTR_CODE) %>%
+  summarise(total_patients = n(),
+            exceptions = sum(REC_EXCEPTION_EVER == "Received Exception"),
+            noexceptions = sum(REC_EXCEPTION_EVER == "Standard Criteria Listing")) 
+
+by_center_data %>% select(exceptions, noexceptions) %>% chisq.test()
+
+
+
+
+
+
+
+
+```
+
+
+``` {r fortable2}
+
+
+fortable2 = cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% slice(1) %>%
+  mutate(
+    sex = ifelse(GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      ETHCAT == 1 ~ "White",
+      ETHCAT == 2 ~ "Black",
+      ETHCAT == 4 ~ "Hispanic/Latino",
+      ETHCAT == 5 ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    REC_EXCEPTION_INIT_EVER = factor(REC_EXCEPTION_INIT_EVER, levels = c("No Exception", "Exception at Listing", "Exception after Listing")),
+    age_group = case_when(
+      INIT_AGE < 1 ~ "< 1",
+      INIT_AGE >= 1 & INIT_AGE < 5 ~ "1-4",
+      INIT_AGE >= 5 & INIT_AGE < 12 ~ "5-11",
+      INIT_AGE >= 12 ~ "> 12"),
+    age_group = factor(age_group, levels = c("< 1", "1-4", "5-11", "> 12")),
+    blood_type = factor(
+      case_when(
+        ABO %in% c("A", "A1", "A2") ~ "A",
+        ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ ABO)),
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    support = case_when(
+      ECMO_TCR == 1 ~ "ECMO",
+      INOTROPES_TCR == 1 ~ "Inotropes",
+      VAD_DEVICE_TY_TCR == 2 | VAD_DEVICE_TY_TCR == 3 | VAD_DEVICE_TY_TCR == 5 ~ "VAD",
+      VENTILATOR_TCR == 1 ~ "Mechanical Ventilation",
+      TRUE ~ NA),
+    support = factor(support, levels = c("ECMO", "VAD", "Inotropes", "Mechanical Ventilation")),
+    initial_status = factor(initial_status, levels = c("1A", "1B", "2")),
+    EXCEPTION = factor(EXCEPTION, levels = c(0, 1), labels = c("No Exception", "Exception")))
+
+var_label_list <- list(age_group = "Age at Listing (Years)",
+                       sex = "Sex",
+                       race = "Race",
+                       INIT_WGT_KG_CALC = "Weight (Kilograms)",
+                       initial_status = "Status at Initial Listing",
+                       blood_type = "Blood Type",
+                       diagnosis = "Primary Diagnosis",
+                       support = "Support at Listing",
+                       EXCEPTION = "Exception Status at Listing",
+                       REC_EXCEPTION_INIT_EVER = "Exception Status")
+labelled::var_label(fortable2) <- var_label_list
+
+
+fortable2 %>% ungroup() %>%
+  dplyr::select(
+    age_group, sex, race, INIT_WGT_KG_CALC, blood_type, diagnosis, EXCEPTION, support, initial_status) %>%
+  tbl_summary(by = initial_status, digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  #remove_row_type(variables = c(pcwp, cardiac_index), type = "missing", level_value = ("(Missing)")) %>%
+  remove_row_type(variables = c(support, INIT_WGT_KG_CALC), type = "missing", level_value = ("(Unknown)")) %>%
+  as_gt()
+
+
+```
+
+
+
+
+``` {r first model}
+first_model_death <- coxme(Surv(start, end, death) ~ EXCEPTION_STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+
+# first_model_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION_STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+    
+summary(first_model_death)
+
+first_plot_death = plot_model(
+  first_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  axis.labels = c(
+    "Status 2",
+    "Status 1A Exception",
+    "Status 1A No Exception",
+    "Status 1B Exception",
+    "Status 1B No Exception"),
+  title = "Mixed Effects Model with Center Random Effects",
+  axis.title = "Hazard Ratio"
+)
+# 
+# first_plot_transplant = plot_model(
+#   first_model_transplant,
+#   show.values = TRUE,
+#   value.offset = .3,
+#   axis.labels = c(
+#     "Status 2",
+#     "Status 1A Exception",
+#     "Status 1A No Exception",
+#     "Status 1B Exception",
+#     "Status 1B No Exception"),
+#   title = "Mixed Effects Model with Center Random Effects",
+#   axis.title = "Hazard Ratio"
+# )
+    
+    
+```
+   
+   
+``` {r second model}    
+second_model_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+# second_model_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes)
+
+
+summary(second_model_death)
+exp(confint(second_model_death))
+
+second_plot_death = plot_model(
+  second_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c(
+    "Status 1A",
+    "Status 1B",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+# 
+# 
+# summary(second_model_transplant)
+# exp(confint(second_model_transplant))
+# 
+# second_plot_transplant = plot_model(
+#   second_model_transplant,
+#   show.values = TRUE,
+#   value.offset = .3,
+#   value.size = 6,
+#   axis.labels = c(
+#     "Status 1B",
+#     "Status 1A",
+#     "Exception"),
+#   title = "",
+#   axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+#   grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+#   theme_classic() +
+#   theme(text = element_text(size = 20),
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20),
+#         legend.title = element_text(size = 20))
+
+
+```
+
+
+``` {r fixed effects model}
+coxph_stat_ex_strat <- coxph(Surv(start, end, death) ~ EXCEPTION + STATUS + strata(LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+
+summary(coxph_stat_ex_strat)
+exp(confint(coxph_stat_ex_strat))
+
+fixed_effects_model = plot_model(
+  coxph_stat_ex_strat,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c(
+    "Status 1A",
+    "Status 1B",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+  
+```
+
+
+``` {r check distribution of random effects}
+num_tx_by_center <- cand_hx_list_episodes_grouping %>%
+  filter(death == 1) %>%
+  group_by(LISTING_CTR_CODE) %>%
+  count()
+#center 602 is close to the "mean" center
+for_fe <- cand_hx_list_episodes_grouping %>%
+  left_join(num_tx_by_center, by = "LISTING_CTR_CODE") %>%
+  filter(n >= 5) %>%
+  mutate(LISTING_CTR_CODE = factor(LISTING_CTR_CODE), 
+         LISTING_CTR_CODE = relevel(LISTING_CTR_CODE, ref = "00248"))
+full_fe <- "Surv(start, end, death) ~ EXCEPTION + STATUS + LISTING_CTR_CODE"
+full_fe_model <- coxph(as.formula(full_fe), for_fe)
+
+#centers_excluded <- length(unique(forcoxmodel$CAN_LISTING_CTR_CD)) - length(levels(for_fe$CAN_LISTING_CTR_CD))
+sum_fe_model <- summary(full_fe_model)$coefficients
+
+substrRight <- function(x, n) {
+  substr(x, nchar(x) - n + 1, nchar(x))
+}
+
+fe_coef <- tibble(name = names(full_fe_model$coefficients),
+                  beta = unname(sum_fe_model[,2])) %>%
+  filter(grepl("LISTING_CTR_CODE", name) == TRUE) %>%
+  mutate(LISTING_CTR_CODE = substrRight(name, 5)) %>%
+  dplyr::select(-name)
+
+
+histogram_plot = ggplot(fe_coef, aes(x = beta)) + geom_histogram(breaks = seq(0, 3, 0.5))
+s_w_norm_test <- shapiro.test(sum_fe_model)[[2]]
+
+re_effects <- data.frame(ranef(second_model_death)[[1]])
+re_effects$LISTING_CTR_CODE <- row.names(re_effects)
+colnames(re_effects)[1] <- "re"
+#make a center level dataset of random effects
+
+center_re <- re_effects %>%
+  mutate(death_hazard = exp(re))
+for_spear <- center_re %>%
+  filter(LISTING_CTR_CODE %in% fe_coef$LISTING_CTR_CODE) %>%
+  left_join(fe_coef %>% dplyr::select(LISTING_CTR_CODE, beta))
+spearman_cor <- cor(for_spear$death_hazard, for_spear$beta, method = "spearman")
+ggplot(for_spear, aes(x = death_hazard, y = beta)) + geom_point() +
+labs(x = "Center-specific hazard of death (RE estimate)",
+     y = "Center-specific hazard of death (FE estimate)")
+
+
+
+# 
+# num_tx_by_center <- cand_hx_list_episodes_grouping %>%
+#   filter(transplant == 1) %>%
+#   group_by(LISTING_CTR_CODE) %>%
+#   count()
+# #center 602 is close to the "mean" center
+# for_fe <- cand_hx_list_episodes %>%
+#   left_join(num_tx_by_center, by = "LISTING_CTR_CODE") %>%
+#   filter(n >= 5) %>%
+#   mutate(LISTING_CTR_CODE = factor(LISTING_CTR_CODE), 
+#          LISTING_CTR_CODE = relevel(LISTING_CTR_CODE, ref = "00248"))
+# full_fe <- "Surv(start, end, transplant) ~ EXCEPTION + STATUS + LISTING_CTR_CODE"
+# full_fe_model <- coxph(as.formula(full_fe), for_fe)
+# 
+# #centers_excluded <- length(unique(forcoxmodel$CAN_LISTING_CTR_CD)) - length(levels(for_fe$CAN_LISTING_CTR_CD))
+# sum_fe_model <- summary(full_fe_model)$coefficients
+# 
+# substrRight <- function(x, n) {
+#   substr(x, nchar(x) - n + 1, nchar(x))
+# }
+# 
+# fe_coef <- tibble(name = names(full_fe_model$coefficients),
+#                   beta = unname(sum_fe_model[,2])) %>%
+#   filter(grepl("LISTING_CTR_CODE", name) == TRUE) %>%
+#   mutate(LISTING_CTR_CODE = substrRight(name, 5)) %>%
+#   dplyr::select(-name)
+# 
+# 
+# ggplot(fe_coef, aes(x = beta)) + geom_histogram(breaks = seq(0, 3, 0.1))
+# s_w_norm_test <- shapiro.test(sum_fe_model)[[2]]
+# 
+# re_effects <- data.frame(ranef(second_model_transplant)[[1]])
+# re_effects$LISTING_CTR_CODE <- row.names(re_effects)
+# colnames(re_effects)[1] <- "re"
+# #make a center level dataset of random effects
+# 
+# center_re <- re_effects %>%
+#   mutate(transplant_hazard = exp(re))
+# for_spear <- center_re %>%
+#   filter(LISTING_CTR_CODE %in% fe_coef$LISTING_CTR_CODE) %>%
+#   left_join(fe_coef %>% dplyr::select(LISTING_CTR_CODE, beta))
+# spearman_cor <- cor(for_spear$transplant_hazard, for_spear$beta, method = "spearman")
+# ggplot(for_spear, aes(x = transplant_hazard, y = beta)) + geom_point() +
+# labs(x = "Center-specific hazard of transplant (RE estimate)",
+#      y = "Center-specific hazard of transplant (FE estimate)")
+
+
+```
+
+``` {r per status models}
+#Status 1A ONLY
+
+status1a <- cand_hx_list_episodes_grouping %>%
+  filter(STATUS == "1A")
+
+coxme_stat1a_death <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a)
+# coxme_stat1a_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a)
+
+summary(coxme_stat1a_death)
+exp(confint(coxme_stat1a_death))
+# 
+# summary(coxme_stat1a_transplant)
+# exp(confint(coxme_stat1a_transplant))
+
+status1b <- cand_hx_list_episodes_grouping %>%
+  filter(STATUS == "1B")
+
+coxme_stat1b_death <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b)
+# coxme_stat1b_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b)
+
+summary(coxme_stat1b_death)
+exp(confint(coxme_stat1b_death))
+# 
+# summary(coxme_stat1b_transplant)
+# exp(confint(coxme_stat1b_transplant))
+
+coxme_stats_ex <- plot_models(
+  coxme_stat1a_death,
+  coxme_stat1b_death,
+  axis.labels = "Exception",
+  m.labels = c("Status 1A", "Status 1B"),
+  value.size = 6,
+  # title = "Mixed Effects Model with Center Random Effects",
+  legend.title = "",
+  axis.title = "Hazard Ratio",
+  spacing = 1,
+  show.values = TRUE,
+  show.p = TRUE,
+  grid.breaks = c(0.01, 0.1, 1, 10)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+```
+
+
+
+
+
+
+``` {r pre and post nhrb models}
+
+
+cand_hx_list_episodes_pre_nhrb = cand_hx_list_episodes_grouping %>% filter(period == "pre-nhrb") %>%
+  filter(CHG_DATE <= mdy("05-31-2021")) %>%
+  mutate(
+    death = case_when(
+      death == 1 & CHG_END_DATE > mdy("05-31-2021") ~ 0,
+      TRUE ~ death),
+    transplant = case_when(
+      transplant == 1 & CHG_END_DATE > mdy("05-31-2021") ~ 0,
+      TRUE ~ transplant))
+
+model_pre_nhrb_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_pre_nhrb)
+summary(model_pre_nhrb_death)
+exp(confint(model_pre_nhrb_death))
+# 
+# model_pre_nhrb_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_pre_nhrb)
+# summary(model_pre_nhrb_transplant)
+# exp(confint(model_pre_nhrb_transplant))
+
+pre_nhrb_plot_death = plot_model(
+  model_pre_nhrb_death,
+  show.values = TRUE,
+  value.offset = .3,
+  axis.labels = c(
+    "Status 1B",
+    "Status 1A",
+    "Exception"),
+  title = "Mixed Effects Model with Center Random Effects",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality, Pre-NHRB",
+  grid.breaks = c(0.1, 1, 10, 100)
+)
+
+# pre_nhrb_plot_transplant = plot_model(
+#   model_pre_nhrb_transplant,
+#   show.values = TRUE,
+#   value.offset = .3,
+#   axis.labels = c(
+#     "Status 1B",
+#     "Status 1A",
+#     "Exception"),
+#   title = "Mixed Effects Model with Center Random Effects",
+#   axis.title = "Hazard Ratio of Transplantation, Pre-NHRB",
+#   grid.breaks = c(0.1, 1, 10, 100)
+# )
+
+
+cand_hx_list_episodes_post_nhrb = cand_hx_list_episodes_grouping %>% filter(period == "post-nhrb") %>%
+  filter(CHG_DATE <= mdy("05-31-2025")) %>%
+  mutate(
+    death = case_when(
+      death == 1 & CHG_END_DATE > mdy("05-31-2025") ~ 0,
+      TRUE ~ death),
+    transplant = case_when(
+      transplant == 1 & CHG_END_DATE > mdy("05-31-2025") ~ 0,
+      TRUE ~ transplant))
+
+model_post_nhrb_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_post_nhrb)
+summary(model_post_nhrb_death)
+exp(confint(model_post_nhrb_death))
+
+# model_post_nhrb_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_post_nhrb)
+# summary(model_post_nhrb_transplant)
+# exp(confint(model_post_nhrb_transplant))
+
+post_nhrb_plot_death = plot_model(
+  model_post_nhrb_death,
+  show.values = TRUE,
+  value.offset = .3,
+  axis.labels = c(
+    "Status 1B",
+    "Status 1A",
+    "Exception"),
+  title = "Mixed Effects Model with Center Random Effects",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality, Post-NHRB",
+  grid.breaks = c(0.1, 1, 10, 100)
+)
+
+# post_nhrb_plot_transplant = plot_model(
+#   model_post_nhrb_transplant,
+#   show.values = TRUE,
+#   value.offset = .3,
+#   axis.labels = c(
+#     "Status 1B",
+#     "Status 1A",
+#     "Exception"),
+#   title = "Mixed Effects Model with Center Random Effects",
+#   axis.title = "Hazard Ratio of Transplantation, Post-NHRB",
+#   grid.breaks = c(0.1, 1, 10, 100)
+# )
+
+
+nhrb_plot_base_death = plot_models(
+  model_pre_nhrb_death,
+  model_post_nhrb_death,
+  show.values = TRUE,
+  value.size = 6,
+  #value.offset = .3,
+  axis.labels = c(
+    "Status 1A",
+    "Status 1B",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) + 
+  scale_color_manual(
+    values = c("blue", "red"), # Specify colors
+    labels = c("Pre-NHRB", "Post-NHRB")) 
+
+# 2. Get the plot's data and reorder the "group" factor
+nhrb_plot_data_death <- nhrb_plot_base_death$data
+
+
+# 3. Rebuild the plot with the manually ordered data and the manual color scale
+nhrb_plot_death <- nhrb_plot_base_death + 
+  ggplot2::aes(color = nhrb_plot_data_death$group) + 
+  scale_color_manual(
+    values = c("#df8f44", "#00a1d5"),
+    labels = c("Post-NHRB", "Pre-NHRB")
+  ) +
+  labs(color = "Cohort Era") +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+# nhrb_plot_base_transplant = plot_models(
+#   model_pre_nhrb_transplant,
+#   model_post_nhrb_transplant,
+#   show.values = TRUE,
+#   value.size = 6,
+#   #value.offset = .3,
+#   axis.labels = c(
+#     "Status 1B",
+#     "Status 1A",
+#     "Exception"),
+#   title = "",
+#   axis.title = "Hazard Ratio of Transplantation",
+#   grid.breaks = c(0.01, 0.1, 1, 10, 100)) + 
+#   scale_color_manual(
+#     values = c("blue", "red"), # Specify colors
+#     labels = c("Pre-NHRB", "Post-NHRB")) 
+# 
+# # 2. Get the plot's data and reorder the "group" factor
+# nhrb_plot_data_transplant <- nhrb_plot_base_transplant$data
+# 
+# 
+# # 3. Rebuild the plot with the manually ordered data and the manual color scale
+# nhrb_plot_transplant <- nhrb_plot_base_transplant + 
+#   ggplot2::aes(color = nhrb_plot_data_transplant$group) + 
+#   scale_color_manual(
+#     values = c("#374e55", "#b24745"),
+#     labels = c("Post-NHRB", "Pre-NHRB")
+#   ) +
+#   labs(color = "Cohort Era") +
+#   theme_classic() +
+#   theme(text = element_text(size = 20),
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20),
+#         legend.title = element_text(size = 20))
+# 
+
+
+
+
+
+
+status1a_pre_nhrb <- cand_hx_list_episodes_pre_nhrb %>%
+  filter(STATUS == "1A")
+
+coxme_stat1a_pre_nhrb <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a_pre_nhrb)
+
+summary(coxme_stat1a_pre_nhrb)
+exp(confint(coxme_stat1a_pre_nhrb))
+
+status1b_pre_nhrb <- cand_hx_list_episodes_pre_nhrb %>%
+  filter(STATUS == "1B")
+
+coxme_stat1b_pre_nhrb <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b_pre_nhrb)
+
+summary(coxme_stat1b_pre_nhrb)
+exp(confint(coxme_stat1b_pre_nhrb))
+
+status1a_post_nhrb <- cand_hx_list_episodes_post_nhrb %>%
+  filter(STATUS == "1A")
+
+coxme_stat1a_post_nhrb <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a_post_nhrb)
+
+summary(coxme_stat1a_post_nhrb)
+exp(confint(coxme_stat1a_post_nhrb))
+
+status1b_post_nhrb <- cand_hx_list_episodes_post_nhrb %>%
+  filter(STATUS == "1B")
+
+coxme_stat1b_post_nhrb <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b_post_nhrb)
+
+summary(coxme_stat1b_post_nhrb)
+exp(confint(coxme_stat1b_post_nhrb))
+
+coxme_stats_ex_nhrb <- plot_models(
+  coxme_stat1a_pre_nhrb,
+  coxme_stat1b_pre_nhrb,
+  coxme_stat1a_post_nhrb,
+  coxme_stat1b_post_nhrb,
+  axis.labels = "Exception",
+  m.labels = c("Status 1A Pre-NHRB", "Status 1B Pre-NHRB", "Status 1A Post-NHRB", "Status 1B Post-NHRB"),
+  # title = "Mixed Effects Model with Center Random Effects",
+  legend.title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  spacing = 1,
+  show.values = TRUE,
+  show.p = TRUE,
+  grid.breaks = c(0.01, 0.1, 1, 10)
+)
+
+```
+
+``` {r sensitivity}
+
+sensitivity_data = cand_hx_list_episodes_grouping %>%
+  mutate(
+    sex = ifelse(GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      ETHCAT == 1 ~ "White",
+      ETHCAT == 2 ~ "Black",
+      ETHCAT == 4 ~ "Hispanic/Latino",
+      ETHCAT == 5 ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    age_group = case_when(
+      INIT_AGE < 1 ~ "< 1",
+      INIT_AGE >= 1 & INIT_AGE < 5 ~ "1-4",
+      INIT_AGE >= 5 & INIT_AGE < 12 ~ "5-11",
+      INIT_AGE >= 12 ~ "> 12"),
+    age_group = factor(age_group, levels = c("< 1", "1-4", "5-11", "> 12")),
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    blood_type = factor(
+      case_when(
+        ABO %in% c("A", "A1", "A2") ~ "A",
+        ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ ABO)),
+    ecmo = ifelse(ECMO_TCR == 1, 1, 0),
+    inotropes = ifelse(INOTROPES_TCR == 1, 1, 0),
+    vad = ifelse(VAD_DEVICE_TY_TCR == 2 | VAD_DEVICE_TY_TCR == 3 | VAD_DEVICE_TY_TCR == 5, 1, 0),
+    ventilator = ifelse(VENTILATOR_TCR == 1, 1, 0))
+    
+
+sensitivity_model_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + sex + race + age_group + blood_type + diagnosis + ecmo + inotropes + vad + ventilator + (1 | LISTING_CTR_CODE), data = sensitivity_data)
+
+summary(sensitivity_model_death)
+exp(confint(sensitivity_model_death))
+
+# sensitivity_model_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + STATUS + sex + race + age_group + blood_type + diagnosis + ecmo + inotropes + vad + ventilator + (1 | LISTING_CTR_CODE), data = sensitivity_data)
+# 
+# summary(sensitivity_model_transplant)
+# exp(confint(sensitivity_model_transplant))
+
+sensitivity_plot_death = plot_model(
+  sensitivity_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c("Mechanical Ventilation", "Ventricular Assist Device", "Intravenous Inotropes", "ECMO", "Other", "Re-Heart TX", "Hypertrophic Cardiomyopathy", "Congenital Heart Disease", "Restrictive Cardiomyopathy", "O", "B", "AB", "12 Years and Older", "5-11 Years", "1-4 Years", "Other Race", "Asian", "Hispanic/Latino", "Black", "Female", "Status 1A", "Status 1B", "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+# sensitivity_plot_transplant = plot_model(
+#   sensitivity_model_transplant,
+#   show.values = TRUE,
+#   value.offset = .3,
+#   value.size = 6,
+#   axis.labels = c("Mechanical Ventilation", "Ventricular Assist Device", "Intravenous Inotropes", "ECMO", "Other", "Re-Heart TX", "Hypertrophic Cardiomyopathy", "Congenital Heart Disease", "Restrictive Cardiomyopathy", "O", "B", "AB", "12 Years and Older", "5-11 Years", "1-4 Years", "Other Race", "Asian", "Hispanic/Latino", "Black", "Female", "Status 1B", "Status 1A", "Exception"),
+#   title = "",
+#   axis.title = "Hazard Ratio of Transplantation",
+#   grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+#   theme_classic() +
+#   theme(text = element_text(size = 20),
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20),
+#         legend.title = element_text(size = 20))
+
+
+
+
+
+
+
+ggplot(cand_hx_list_episodes_grouping, aes(x = STATUS, fill = REC_EXCEPTION_INIT_EVER)) + 
+  geom_bar() + 
+  labs(x = "Status", y = "Number of Status Justifications", fill = "")
+
+
+
+
+
+```
+
+
+``` {r figure 1}
+
+first_observations = cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% slice(1) %>% 
+  mutate(
+    new_exception_status = case_when(
+      EXCEPTION == 0 ~ "No Exception",
+      EXCEPTION == 1 ~ "Exception at Listing")) %>% ungroup()
+
+last_observations = cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% filter(row_number() > 1) %>% 
+  mutate(
+    new_exception_status = case_when(
+      EXCEPTION == 0 ~ "No Exception",
+      EXCEPTION == 1 ~ "Exception after Listing")) %>% ungroup()
+
+data_for_figure1 = cand_hx_list_episodes %>% filter(!is.na(RequestedCandStatCd)) %>%
+#  rbind(first_observations, last_observations) %>%
+  mutate(
+    STATUS = factor(STATUS, levels = c("1A", "1B", "2"), labels = c("Status 1A", "Status 1B", "Status 2")),
+    EXCEPTION = factor(EXCEPTION, levels = c("0", "1"), labels = c("No Exception", "Exception")))
+
+
+just_files = just_files %>%
+  mutate(
+    STATUS = factor(RequestedCandStatCd, levels = c("2010", "2020"), labels = c("Status 1A", "Status 1B")),
+    EXCEPTION = factor(EXCEPTION, levels = c("0", "1"), labels = c("No Exception", "Exception")))
+
+fig1 = ggplot(data_for_figure1, aes(x = STATUS, fill = EXCEPTION)) + 
+  geom_bar() + 
+  labs(x = "", y = "Number of Status Justification Files", fill = "") +
+  scale_fill_manual(values = c("#00a1d5", "#df8f44")) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+
+
+```
+
+
+``` {r post_transplant survival}
+
+
+heart_transplants <- cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% 
+  mutate(
+    tx = case_when(
+      is_last_row == TRUE & REM_CD == 4 ~ 1,
+      TRUE ~ 0)) %>% filter(tx == 1) %>%
+  left_join(tx_list, by = "PT_CODE") %>% filter(TRR_ID_CODE.x == TRR_ID_CODE.y | is.na(TRR_ID_CODE.y)) %>%
+  select(-TRR_ID_CODE.x, -TRR_ID_CODE.y) %>%
+  mutate(
+    PX_STAT_DATE = case_when(
+      is.na(PX_STAT_DATE) & !is.na(COMPOSITE_DEATH_DATE) ~ COMPOSITE_DEATH_DATE,
+      is.na(PX_STAT_DATE) & is.na(COMPOSITE_DEATH_DATE) ~ TX_DATE,
+      TRUE ~ PX_STAT_DATE),
+    PX_STAT = case_when(
+      is.na(PX_STAT) & !is.na(COMPOSITE_DEATH_DATE) ~ "D",
+      is.na(PX_STAT) & is.na(COMPOSITE_DEATH_DATE) ~ "A",
+      TRUE ~ PX_STAT),
+    post_transplant_time = as.numeric(difftime(PX_STAT_DATE, TX_DATE, units = "days")),
+    #post_transplant_time_year = post_transplant_time / 365.25,
+    post_transplant_time = ifelse(post_transplant_time > 365.25, 365.25, post_transplant_time),
+    post_transplant_death = ifelse(PX_STAT == "D" & post_transplant_time <= 365.25, 1, 0),
+    post_transplant_death = ifelse(is.na(post_transplant_death), 0, post_transplant_death))
+
+    
+   
+
+```
+
+``` {r exceptions figures}
+
+# hearts_just_cohorts = heart_transplants %>% filter(period != "other") %>% group_by(period) %>% summarise(median = median(end))
+
+
+
+
+calculations_for_heart_transplants <- heart_transplants %>% 
+  mutate(EXCEPTION = ifelse(is.na(EXCEPTION), 0, EXCEPTION)) %>%
+  select(WL_ID_CODE, period, EXCEPTION) %>% ungroup() %>% 
+  group_by(period) %>% summarise(transplants = n(), exceptions_at_transplant = sum(EXCEPTION), na.rm = TRUE) %>%
+  mutate(exceptionproportion = exceptions_at_transplant / transplants) 
+
+calculations_for_heart_transplants <- calculations_for_heart_transplants %>% filter(period != "other")
+
+calculations_for_heart_transplants %>% select(transplants, exceptions_at_transplant) %>% chisq.test()
+
+
+exception_at_heart_transplant <- heart_transplants %>% filter(EXCEPTION == 1) %>%
+  mutate(
+    EXCEPTION_STATUS = case_when(
+      EXCEPTION == 1 ~ "1A/1B Exception at Time of Transplant")) %>% select(WL_ID_CODE, period, EXCEPTION, EXCEPTION_STATUS, TX_DATE)
+
+total <- heart_transplants %>% mutate(EXCEPTION_STATUS = "Total") %>% select(WL_ID_CODE, period, EXCEPTION, EXCEPTION_STATUS, TX_DATE)
+
+
+  
+barplotdata <- rbind(exception_at_heart_transplant, total) %>% filter(TX_DATE >= mdy("04-01-2016") & TX_DATE <= mdy("06-30-2025")) %>%
+  mutate(
+    status = factor(EXCEPTION_STATUS, levels = c("Total", "1A/1B Exception at Time of Transplant"))) %>%
+  mutate(
+    timing_of_transplants = case_when(
+      TX_DATE >= mdy("04-01-2016") & TX_DATE <= mdy("06-30-2016") ~ "Apr-Jun 2016",
+      TX_DATE >= mdy("07-01-2016") & TX_DATE <= mdy("09-30-2016") ~ "Jul-Sep 2016",
+      TX_DATE >= mdy("10-01-2016") & TX_DATE <= mdy("12-31-2016") ~ "Oct-Dec 2016",
+      TX_DATE >= mdy("01-01-2017") & TX_DATE <= mdy("03-31-2017") ~ "Jan-Mar 2017",
+      TX_DATE >= mdy("04-01-2017") & TX_DATE <= mdy("06-30-2017") ~ "Apr-Jun 2017",
+      TX_DATE >= mdy("07-01-2017") & TX_DATE <= mdy("09-30-2017") ~ "Jul-Sep 2017",
+      TX_DATE >= mdy("10-01-2017") & TX_DATE <= mdy("12-31-2017") ~ "Oct-Dec 2017",
+      TX_DATE >= mdy("01-01-2018") & TX_DATE <= mdy("03-31-2018") ~ "Jan-Mar 2018",
+      TX_DATE >= mdy("04-01-2018") & TX_DATE <= mdy("06-30-2018") ~ "Apr-Jun 2018",
+      TX_DATE >= mdy("07-01-2018") & TX_DATE <= mdy("09-30-2018") ~ "Jul-Sep 2018",
+      TX_DATE >= mdy("10-01-2018") & TX_DATE <= mdy("12-31-2018") ~ "Oct-Dec 2018",
+      TX_DATE >= mdy("01-01-2019") & TX_DATE <= mdy("03-31-2019") ~ "Jan-Mar 2019",
+      TX_DATE >= mdy("04-01-2019") & TX_DATE <= mdy("06-30-2019") ~ "Apr-Jun 2019",
+      TX_DATE >= mdy("07-01-2019") & TX_DATE <= mdy("09-30-2019") ~ "Jul-Sep 2019",
+      TX_DATE >= mdy("10-01-2019") & TX_DATE <= mdy("12-31-2019") ~ "Oct-Dec 2019",
+      TX_DATE >= mdy("01-01-2020") & TX_DATE <= mdy("03-31-2020") ~ "Jan-Mar 2020",
+      TX_DATE >= mdy("04-01-2020") & TX_DATE <= mdy("06-30-2020") ~ "Apr-Jun 2020",
+      TX_DATE >= mdy("07-01-2020") & TX_DATE <= mdy("09-30-2020") ~ "Jul-Sep 2020",
+      TX_DATE >= mdy("10-01-2020") & TX_DATE <= mdy("12-31-2020") ~ "Oct-Dec 2020",
+      TX_DATE >= mdy("01-01-2021") & TX_DATE <= mdy("03-31-2021") ~ "Jan-Mar 2021",
+      TX_DATE >= mdy("04-01-2021") & TX_DATE <= mdy("04-30-2021") ~ "Apr 2021",
+      TX_DATE >= mdy("05-01-2021") & TX_DATE <= mdy("05-31-2021") ~ "May 2021",
+      TX_DATE >= mdy("06-01-2021") & TX_DATE <= mdy("06-30-2021") ~ "Jun 2021",
+      TX_DATE >= mdy("07-01-2021") & TX_DATE <= mdy("09-30-2021") ~ "Jul-Sep 2021",
+      TX_DATE >= mdy("10-01-2021") & TX_DATE <= mdy("12-31-2021") ~ "Oct-Dec 2021",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2022") ~ "Jan-Mar 2022",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2022") ~ "Apr-Jun 2022",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2022") ~ "Jul-Sep 2022",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2022") ~ "Oct-Dec 2022",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2023") ~ "Jan-Mar 2023",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2023") ~ "Apr-Jun 2023",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2023") ~ "Jul-Sep 2023",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2023") ~ "Oct-Dec 2023",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2024") ~ "Jan-Mar 2024",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2024") ~ "Apr-Jun 2024",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2024") ~ "Jul-Sep 2024",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2024") ~ "Oct-Dec 2024",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2025") ~ "Jan-Mar 2025",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2025") ~ "Apr-Jun 2025"),
+    timing_of_transplants = factor(timing_of_transplants, levels = c("Apr-Jun 2016", "Jul-Sep 2016", "Oct-Dec 2016", "Jan-Mar 2017", "Apr-Jun 2017", "Jul-Sep 2017", "Oct-Dec 2017", "Jan-Mar 2018", "Apr-Jun 2018", "Jul-Sep 2018", "Oct-Dec 2018", "Jan-Mar 2019", "Apr-Jun 2019", "Jul-Sep 2019", "Oct-Dec 2019", "Jan-Mar 2020", "Apr-Jun 2020", "Jul-Sep 2020", "Oct-Dec 2020", "Jan-Mar 2021", "Apr 2021", "May 2021", "Jun 2021", "Jul-Sep 2021", "Oct-Dec 2021", "Jan-Mar 2022", "Apr-Jun 2022", "Jul-Sep 2022", "Oct-Dec 2022", "Jan-Mar 2023", "Apr-Jun 2023", "Jul-Sep 2023", "Oct-Dec 2023", "Jan-Mar 2024", "Apr-Jun 2024", "Jul-Sep 2024", "Oct-Dec 2024", "Jan-Mar 2025", "Apr-Jun 2025")))
+
+
+
+by_month <- barplotdata %>%
+  group_by(timing_of_transplants) %>%
+  count(status) %>%
+  mutate(total_per_month = sum(n)) %>%
+  ungroup() %>%
+  mutate(percentage_per_month = 100*n/total_per_month) 
+# policy_switch <- which(levels(by_month$month) == "Jun 2021")
+# pre_policy_start <- which(levels(by_month$month) == "Jul 2017")
+# pre_policy_end <- which(levels(by_month$month) == "Feb 2021")
+# post_policy_start <- which(levels(by_month$month) == "Jul 2021")
+# post_policy_end <- which(levels(by_month$month) == "Feb 2025")
+
+
+exceptions_at_transplant_barplot <- ggplot(by_month, aes(x = timing_of_transplants, y = percentage_per_month, fill = status, group = status)) +
+  geom_col(alpha = 0.75, color = "NA") +
+  geom_vline(aes(xintercept = "Jun 2021", linetype = "NHRB Implementation Date")) + 
+  #scale_color_custom(name = "Exception Status at Transplant", palette = "simple") +
+  labs(
+    x = "",
+    y = "% Exceptions at Transplant",
+    linetype = "",
+    fill = "status") +
+  scale_y_continuous(limits = c(0, 30), breaks = seq(0, 300, by = 10)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 16),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18),
+        legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.margin = margin(t=0, r=0, b=0, l=0, unit = "mm"),
+        legend.direction = "vertical",
+        legend.title.align = 0,
+        panel.background = element_rect(fill = "grey99"),
+        plot.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(linewidth = 0.5, linetype = "solid", colour = "black")
+  ) +
+  scale_linetype_manual(values = c("dashed", "dotted", "solid")) +
+  scale_fill_manual(name = "", values = c("#b24745", "white"), breaks = c("Status 1A/1B Exception")) + 
+  guides(fill = guide_legend(nrow = 2)) +
+  annotate("text", x = "Apr-Jun 2019", y = 28, label= "Pre-NHRB Cohort", size = 16/.pt) +
+  annotate("text", x = "Apr-Jun 2023", y = 28, label= "Post-NHRB Cohort", size = 16/.pt) +
+  annotate("rect",
+           xmin = "Jul-Sep 2017",           
+           xmax = "Jan-Mar 2021",
+           ymin = 0, 
+           ymax = 30,  
+           alpha = 0.15) +
+  annotate("rect",
+           xmin = "Jul-Sep 2021",            
+           xmax = "Jan-Mar 2025",            
+           ymin = 0, 
+           ymax = 30, 
+           alpha = 0.15) 
+
+
+
+```
+
+
+
+
+
+
+``` {r exceptions during listing}
+
+exceptionsduringlisting <- cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% period_to_months(CHG_DATE, CHG_END_DATE) %>% ungroup() %>% group_by(WL_ID_CODE, start) %>%
+  mutate(
+    exception_during_month = case_when(
+      any(EXCEPTION == 1) ~ 1,
+      TRUE ~ 0)) %>% slice(1)
+
+#this line of code TAKES FOREVER!
+calculations_for_exceptions <- exceptionsduringlisting %>% 
+  mutate(
+    period_time = case_when(
+      CHG_DATE >= mdy("07-01-2017") & CHG_DATE <= mdy("02-01-2021") ~ "pre",
+      CHG_DATE >= mdy("07-01-2021") & CHG_DATE <= mdy("02-01-2025") ~ "post",
+      TRUE ~ "other")) %>%
+  select(WL_ID_CODE, period, exception_during_month, period_time) %>% ungroup() %>% 
+  group_by(period_time) %>% summarise(total = n(), exceptions_each_month = sum(exception_during_month), na.rm = TRUE) %>%
+  mutate(exceptionproportion = exceptions_each_month / total)
+
+
+calculations_for_exceptions <- calculations_for_exceptions %>% filter(period_time != "other") %>% 
+  mutate(no_exceptions_each_month = total - exceptions_each_month)
+
+
+calculations_for_exceptions %>% select(no_exceptions_each_month, exceptions_each_month) %>% chisq.test()
+
+
+
+
+
+hasexception <- exceptionsduringlisting %>% filter(exception_during_month == 1) %>% 
+  mutate(EXCEPTION_STATUS_GRAPH = case_when(
+    exception_during_month == 1 ~ "Status 1A/1B Exception"))
+
+noexception <- exceptionsduringlisting %>% 
+  mutate(EXCEPTION_STATUS_GRAPH = case_when(
+    exception_during_month == 0 | exception_during_month == 1 ~ "Total"))
+
+trendplot <- rbind(hasexception, noexception) %>% filter(CHG_DATE >= mdy("07-01-2017") & CHG_DATE <= mdy("06-30-2025"))
+
+trendplot <- trendplot %>%
+  mutate(month = zoo::as.yearmon(CHG_DATE),
+         status = factor(EXCEPTION_STATUS_GRAPH,
+                         levels = c("Total", "Status 1A/1B Exception")))
+
+
+
+
+by_month <- trendplot %>%
+  group_by(month) %>%
+  count(status) %>%
+  mutate(total_per_month = sum(n)) %>%
+  ungroup() %>%
+  mutate(month = factor(month),
+         percentage_per_month = 100*n/total_per_month) 
+
+policy_switch <- which(levels(by_month$month) == "Jun 2021")
+pre_policy_start <- which(levels(by_month$month) == "Jul 2017")
+pre_policy_end <- which(levels(by_month$month) == "Feb 2021")
+post_policy_start <- which(levels(by_month$month) == "Jul 2021")
+post_policy_end <- which(levels(by_month$month) == "Feb 2025")
+
+# exceptions_during_listing_lineplot <- ggplot(by_month, aes(x = month, y = n, color = status, group = status)) +
+#   geom_line() + 
+#   geom_point() +
+#   geom_vline(aes(xintercept = policy_switch, linetype = "NHRB Implementation Date")) + 
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+#         axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.position = "bottom",
+#         legend.title = element_text(size = 20),
+#         legend.text = element_text(size = 20),
+#         legend.margin = margin(t=0, r=0, b=0, l=0, unit = "mm"),
+#         legend.direction = "vertical",
+#         legend.title.align = 0,
+#         panel.background = element_rect(fill = "grey99"),
+#         plot.background = element_rect(fill = "white"),
+#         panel.border = element_blank(),
+#         panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank(),
+#         axis.line = element_line(linewidth = 0.5, linetype = "solid", colour = "black")
+#   ) +
+#   labs(
+#     x = "Month of Listing",
+#     y = "Number of Active\nListings per Month",
+#     linetype = "",
+#     color = "Exception Status"
+#   ) +
+#   scale_linetype_manual(values = c("dashed", "dotted", "solid")) +
+#   scale_fill_custom(palette = "simple") +
+#   guides(colour = guide_legend(nrow = 1)) +
+#   annotate("text", x = which(levels(by_month$month) == "May 2019"), y = 1900, label= "Pre-NHRB Cohort", size = 20/.pt) +
+#   annotate("text", x = which(levels(by_month$month) == "May 2023"), y = 1900, label= "Post-NHRB Cohort", size = 20/.pt) +
+#   annotate("rect",
+#            xmin = which(levels(by_month$month) == "Jul 2017"),           
+#            xmax = which(levels(by_month$month) == "Feb 2021"),
+#            ymin = 0, 
+#            ymax = 2000,  
+#            alpha = 0.15) +
+#   annotate("rect",
+#            xmin = which(levels(by_month$month) == "Jul 2021"),            
+#            xmax = which(levels(by_month$month) == "Feb 2025"),            
+#            ymin = 0, 
+#            ymax = 2000, 
+#            alpha = 0.15) 
+
+
+
+
+exceptions_during_listing_barplot <- ggplot(by_month, aes(x = month, y = percentage_per_month, fill = status, group = status)) +
+  geom_col(alpha = 0.75, color = "NA") +
+  geom_vline(aes(xintercept = policy_switch, linetype = "NHRB Implementation Date")) + 
+  labs(
+    x = "Month of Listing",
+    y = "% Listings with Status 1A/1B\nExceptions per Month",
+    linetype = "",
+    fill = "status") +
+  scale_color_custom(name = "Exception Status at Transplant", palette = "simple") +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 20), breaks = seq(0, 20, by = 5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.margin = margin(t=0, r=0, b=0, l=0, unit = "mm"),
+        legend.direction = "vertical",
+        legend.title.align = 0,
+        panel.background = element_rect(fill = "grey99"),
+        plot.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(linewidth = 0.5, linetype = "solid", colour = "black")
+  ) +
+  scale_linetype_manual(values = c("dashed", "dotted", "solid")) +
+  scale_fill_manual(name = "", values = c("#00a1d5", "white"), breaks = c("Status 1A/1B Exception")) +
+  guides(colour = guide_legend(nrow = 1)) +
+  annotate("text", x = which(levels(by_month$month) == "May 2019"), y = 18, label= "Pre-NHRB Cohort", size = 20/.pt) +
+  annotate("text", x = which(levels(by_month$month) == "May 2023"), y = 18, label= "Post-NHRB Cohort", size = 20/.pt) +
+  annotate("rect",
+           xmin = which(levels(by_month$month) == "Jul 2017"),           
+           xmax = which(levels(by_month$month) == "Feb 2021"),
+           ymin = 0, 
+           ymax = 20,  
+           alpha = 0.15) +
+  annotate("rect",
+           xmin = which(levels(by_month$month) == "Jul 2021"),            
+           xmax = which(levels(by_month$month) == "Feb 2025"),            
+           ymin = 0, 
+           ymax = 20, 
+           alpha = 0.15) 
+
+
+figure2 <- plot_grid(exceptions_during_listing_barplot, exceptions_during_listing_lineplot,
+                     ncol = 1, nrow = 2,
+                     labels = c("A", "B"))
+
+
+
+```
+
+
+
+
+
+``` {r posttx survival}
+
+heart_transplants$EXCEPTION <- factor(heart_transplants$EXCEPTION,
+                                      levels = c("0", "1"), # Assuming 0 is censored, adjust if different 
+                                      labels = c("No Exception at Transplant", "Status Exception at Transplant"))
+
+heart_transplants = heart_transplants %>% 
+  mutate(EXC = ifelse(EXCEPTION == "No Exception at Transplant", "No Exception", "Exception"),
+         EXC = factor(EXC, levels = c("No Exception", "Exception")),
+         STATUS = factor(STATUS, levels = c("1A", "1B", "2")))
+
+fig2 = ggplot(heart_transplants, aes(x = STATUS, fill = EXC)) + 
+  geom_bar() + 
+  labs(x = "Status", y = "Number of Transplant Recipients", fill = "Exception Status") +
+  scale_fill_manual(values = c("#00a1d5", "#374e55", "#df8f44")) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+heart_transplants_status1a = heart_transplants %>% filter(STATUS == "1A")
+
+heart_transplants_status1b = heart_transplants %>% filter(STATUS == "1B")
+
+custom_labels <- c("No Exception\nat Transplant", "Status Exception\nat Transplant")
+
+
+km <- Surv(time = heart_transplants$post_transplant_time, event = heart_transplants$post_transplant_death)
+km_fit <- survfit2(km ~ EXCEPTION, data = heart_transplants) # Example: grouping by 'sex'
+
+summary(km_fit, times = 365)
+
+km_plot = ggsurvfit(km_fit) + 
+  add_risktable(
+    size = 6, # Adjust the size for the statistics
+    theme = list(
+      # Use theme_risktable_default() and modify the text sizes
+      theme_risktable_default(axis.text.y.size = 18, plot.title.size = 18),
+      # Use ggplot2's theme() for more detailed control, such as making the title bold
+      theme(plot.title = element_text(face = "bold"))
+    )
+  ) +
+  #add_risktable(size = 6) +
+  #theme_risktable_default(axis.text.y.size = 6, plot.title.size = 6) +
+  add_confidence_interval(alpha = 0.4) +
+  scale_ggsurvfit() +
+  scale_color_manual(values = c("#374e55", "#df8f44"),
+                     labels = custom_labels) +
+  scale_fill_manual(values = c("#374e55", "#df8f44"),
+                    labels = custom_labels) +
+  scale_x_continuous(limits = c(0, 360), breaks = c(0, 60, 120, 180, 240, 300, 360)) +
+  add_censor_mark() +
+  labs(x = "Days after Transplant") +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20)) +
+  add_pvalue(location = "annotation", x = 300, y = 0.8, size = 6, pvalue_fun = \(x) format_p(x, digits = 2))
+  
+
+km_plot
+
+km_1a <- Surv(time = heart_transplants_status1a$post_transplant_time, event = heart_transplants_status1a$post_transplant_death)
+km_fit_1a <- survfit2(km_1a ~ EXCEPTION, data = heart_transplants_status1a) # Example: grouping by 'sex'
+
+summary(km_fit_1a, times = 365)
+
+
+custom_labels_1a <- c("Status 1A at Transplant,\nNo Exception", "Status 1A at Transplant,\nException")
+
+km_plot_1a = ggsurvfit(km_fit_1a) + 
+  add_risktable(
+    size = 6, # Adjust the size for the statistics
+    theme = list(
+      # Use theme_risktable_default() and modify the text sizes
+      theme_risktable_default(axis.text.y.size = 18, plot.title.size = 18),
+      # Use ggplot2's theme() for more detailed control, such as making the title bold
+      theme(plot.title = element_text(face = "bold"))
+    )
+  ) +
+  #add_risktable(size = 6) +
+  #theme_risktable_default(axis.text.y.size = 6, plot.title.size = 6) +
+  add_confidence_interval(alpha = 0.4) +
+  scale_ggsurvfit() +
+  scale_color_manual(values = c("#374e55", "#df8f44"),
+                     labels = custom_labels_1a) +
+  scale_fill_manual(values = c("#374e55", "#df8f44"),
+                    labels = custom_labels_1a) +
+  scale_x_continuous(limits = c(0, 360), breaks = c(0, 60, 120, 180, 240, 300, 360)) +
+  add_censor_mark() +
+  labs(x = "Days after Transplant") +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        legend.position = "bottom") +
+  add_pvalue(location = "annotation", x = 300, y = 0.8, size = 6, pvalue_fun = \(x) format_p(x, digits = 2))
+  
+custom_labels_1b <- c("Status 1B at Transplant,\nNo Exception", "Status 1B at Transplant,\nException")
+
+km_1b <- Surv(time = heart_transplants_status1b$post_transplant_time, event = heart_transplants_status1b$post_transplant_death)
+km_fit_1b <- survfit2(km_1b ~ EXCEPTION, data = heart_transplants_status1b) # Example: grouping by 'sex'
+
+summary(km_fit_1b, times = 365)
+
+
+km_plot_1b = ggsurvfit(km_fit_1b) + 
+  add_risktable(
+    size = 6, # Adjust the size for the statistics
+    theme = list(
+      # Use theme_risktable_default() and modify the text sizes
+      theme_risktable_default(axis.text.y.size = 18, plot.title.size = 18),
+      # Use ggplot2's theme() for more detailed control, such as making the title bold
+      theme(plot.title = element_text(face = "bold"))
+    )
+  ) +
+  #add_risktable(size = 6) +
+  #theme_risktable_default(axis.text.y.size = 6, plot.title.size = 6) +
+  add_confidence_interval(alpha = 0.4) +
+  scale_ggsurvfit() +
+  scale_color_manual(values = c("#374e55", "#df8f44"),
+                     labels = custom_labels_1b) +
+  scale_fill_manual(values = c("#374e55", "#df8f44"),
+                    labels = custom_labels_1b) +
+  scale_x_continuous(limits = c(0, 360), breaks = c(0, 60, 120, 180, 240, 300, 360)) +
+  add_censor_mark() +
+  labs(x = "Days after Transplant") +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        legend.position = "bottom") +
+  add_pvalue(location = "annotation", x = 300, y = 0.8, size = 6, pvalue_fun = \(x) format_p(x, digits = 2))
+
+
+
+km_figures <- cowplot::plot_grid(km_plot_1a, km_plot_1b,
+                        ncol = 2, nrow = 1,
+                        labels = c("A", "B"))
+
+
+post_tx_death <- coxme(Surv(post_transplant_time, post_transplant_death) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = heart_transplants)
+
+
+
+summary(post_tx_death)
+exp(confint(post_tx_death))
+
+post_tx_death_plot = plot_model(
+  post_tx_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c(
+    "Status 1B",
+    "Status 1A",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Post-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+initial_exceptions = cand_hx_list_episodes %>% group_by(WL_ID_CODE) %>% slice(1) %>%
+  mutate(
+    outcome = case_when(
+      REM_CD == 8 | REM_CD == 13 ~ 1,
+      TRUE ~ 0),
+    time = case_when(
+      outcome == 1 ~ as.numeric(difftime(END_DATE, INIT_DATE, units = "days")),
+      outcome == 0 ~ as.numeric(difftime(END_DATE, INIT_DATE, units = "days"))))
+  
+  
+km <- Surv(time = initial_exceptions$time, event = initial_exceptions$outcome)
+km_fit <- survfit(km ~ EXCEPTION, data = initial_exceptions) # Example: grouping by 'sex'
+
+km_plot = ggsurvplot(km_fit, 
+           pval = TRUE,        # Display p-value (if comparing groups)  # Display risk table
+           conf.int = TRUE,    # Display confidence intervals
+           title = "Kaplan-Meier Curve",
+           xlab = "Time (Days)",
+           ylab = "Risk of Death")
+
+
+
+
+
+select(-UNOS_CAND_STAT_CD.y, -FORMEFFECTIVEDT) %>% rename(UNOS_CAND_STAT_CD = UNOS_CAND_STAT_CD.x) %>%
+  group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  mutate(
+    STATUS_CD = ifelse(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 1999, lag(UNOS_CAND_STAT_CD), UNOS_CAND_STAT_CD),
+    STATUS_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) | grepl("1110", UNOS_CAND_STAT_CD) ~ 1,
+      grepl("2120", UNOS_CAND_STAT_CD) | grepl("1120", UNOS_CAND_STAT_CD) ~ 2,
+      grepl("2130", UNOS_CAND_STAT_CD) | grepl("1130", UNOS_CAND_STAT_CD) ~ 3,
+      grepl("2140", UNOS_CAND_STAT_CD) | grepl("1140", UNOS_CAND_STAT_CD) ~ 4,
+      grepl("2150", UNOS_CAND_STAT_CD) | grepl("1150", UNOS_CAND_STAT_CD) ~ 5,
+      grepl("2160", UNOS_CAND_STAT_CD) | grepl("1160", UNOS_CAND_STAT_CD) ~ 6,
+      TRUE ~ NA),
+    index_of_status_change = which(STATUS_CD == 1 | STATUS_CD == 2 | (STATUS_CD == 3 & is.na(CRITERIALVADDISCSUPPORT))) [1])
+
+
+
+
+
+  
+ 
+#UNOS_CAND_STAT_CD = ifelse(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 1999, lag(UNOS_CAND_STAT_CD), UNOS_CAND_STAT_CD),
+
+
+
+cand_hx_list1 = cand_hx_list %>% filter(is.na(index_of_status_change)) %>% mutate(CANHX_END_DT = last(CHG_DATE)) %>% slice(1)
+ 
+cand_hx_list2 = cand_hx_list %>% filter(!is.na(index_of_status_change)) %>% filter(row_number() <= index_of_status_change) %>%
+  mutate(CANHX_END_DT = last(CHG_DATE) - 1) %>% slice(1)
+ 
+cand_hx_list = rbind(cand_hx_list1, cand_hx_list2) %>% select(-index_of_status_change, -UNOS_CAND_STAT_CD, -CHG_TY)
+   
+
+
+
+cand_hx_list = cand_hx_list %>% 
+  mutate(
+    CANHX_END_DT = ifelse(CANHX_END_DT > END_DATE, END_DATE, CANHX_END_DT),
+    CANHX_END_DT = as.Date(CANHX_END_DT, origin = "1970-01-01"),
+    OUTCOME = case_when(
+      REM_CD == 4 & CANHX_END_DT == END_DATE ~ 1,
+      (REM_CD == 13 | REM_CD == 8) & CANHX_END_DT == END_DATE ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(TX_DATE, INIT_DATE, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(END_DATE, INIT_DATE, units = "days")),
+      OUTCOME == 0 ~ as.numeric(difftime(CANHX_END_DT, INIT_DATE, units = "days"))),
+    TIME = ifelse(TIME < 0, 0, TIME)) %>% 
+  left_join(lvads) %>% group_by(WL_ID_CODE) %>% 
+  arrange(IMPLANT_DATE) %>% slice(1) %>%
+  mutate(lvad = ifelse(!is.na(IMPLANT_DATE), 1, 0)) %>% filter(lvad == 0)
+
+# 
+# cand_hx_list$OUTCOME <- factor(cand_hx_list$OUTCOME,
+#                                levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+#                                labels = c("Censored", "Transplant", "Death or Deterioration"))
+# 
+# options("ggsurvfit.switch-color-linetype" = TRUE)
+# 
+# custom_colors <- c(
+#   `dark red` = "#660000",
+#   `bright red` = "#b81d2e",
+#   `orange` = "#ae6320",
+#   `yellow`= "#b8a370",
+#   `green` = "#3ba9a9",
+#   `white` = "#FFFFFF",
+#   `grey` = "#C3C1C1",
+#   `light green` = "#8dd9d7",
+#   `light yellow` = "#ddd3bb",
+#   `light orange` = "#e49f62",
+#   `space sparkle`= "#496061",
+#   `violet` = "#7A3DE3",
+#   `sandy brown` = "#FA9E4D")
+# 
+# custom_colors <- c("black", "#FA9E4D", "#660000") 
+# 
+# 
+# cif_plot <- survfit2(Surv(TIME, OUTCOME) ~ initial_status, data = cand_hx_list) %>%
+#   ggcuminc(
+#     outcome = c("Death or Deterioration"),
+#     linewidth = 1) + 
+#   #add_confidence_interval(alpha = 0.5) +
+#   add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+#   coord_cartesian(xlim = c(0, 2000)) +
+#   scale_x_continuous(breaks = c(0, 500, 1000, 1500, 2000)) +
+#   scale_y_continuous(
+#     limits = c(0, 0.3),
+#     labels = scales::percent, 
+#     expand = c(0.01, 0)
+#   ) +
+#   xlab("Days after Listing") +
+#   theme_classic() +
+#   #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+#   #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+#   scale_color_manual(values = c('black', 'darkred', '#FA9E4D')) +
+#   scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet')) +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+# 
+
+
+
+
+```
+
+
+
+
+
+```{r sensitivity}
+
+# cand_list <- bind_rows(single_registrations %>% ungroup(), 
+#                        sequential_lists %>% ungroup(), 
+#                        collapsed_concurrent_registrations %>% ungroup()) 
+# 
+# #fix listing date 
+# cand_list = cand_list %>% 
+#   mutate(
+#     min_list_date = if_else(is.na(min_list_date), as.Date(CAN_LISTING_DT), as.Date(min_list_date)))
+# 
+# 
+# cand_hx_list = cand_list %>%
+#   mutate(
+#     OUTCOME = case_when(
+#       !is.na(REC_TX_DT) ~ 1,
+#       CAN_REM_CD == 13 | CAN_REM_CD == 8 ~ 2,
+#       TRUE ~ 0),
+#     TIME = case_when(
+#       OUTCOME == 1 ~ as.numeric(difftime(REC_TX_DT, min_list_date, units = "days")),
+#       OUTCOME == 2 ~ as.numeric(difftime(CAN_REM_DT, min_list_date, units = "days")),
+#       TRUE ~ as.numeric(difftime(CAN_REM_DT, min_list_date, units = "days"))))
+# 
+# 
+# cand_hx_list$OUTCOME <- factor(cand_hx_list$OUTCOME,
+#                                levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+#                                labels = c("Censored", "Transplant", "Death or Deterioration"))
+# 
+# options("ggsurvfit.switch-color-linetype" = TRUE)
+# 
+# custom_colors <- c(
+#   `dark red` = "#660000",
+#   `bright red` = "#b81d2e",
+#   `orange` = "#ae6320",
+#   `yellow`= "#b8a370",
+#   `green` = "#3ba9a9",
+#   `white` = "#FFFFFF",
+#   `grey` = "#C3C1C1",
+#   `light green` = "#8dd9d7",
+#   `light yellow` = "#ddd3bb",
+#   `light orange` = "#e49f62",
+#   `space sparkle`= "#496061",
+#   `violet` = "#7A3DE3",
+#   `sandy brown` = "#FA9E4D")
+# 
+# custom_colors <- c("black", "#FA9E4D", "#660000") 
+# 
+# 
+# cif_plot <- survfit2(Surv(TIME, OUTCOME) ~ initial_status, data = cand_hx_list) %>%
+#   ggcuminc(
+#     outcome = c("Death or Deterioration"),
+#     linewidth = 1) + 
+#   add_confidence_interval(alpha = 0.5) +
+#   add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+#   coord_cartesian(xlim = c(0, 180)) +
+#   scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+#   scale_y_continuous(
+#     limits = c(0, 0.2),
+#     labels = scales::percent, 
+#     expand = c(0.01, 0)
+#   ) +
+#   xlab("Days after Listing") +
+#   theme_classic() +
+#   #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+#   #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+#   scale_color_manual(values = c('black', 'darkred', '#FA9E4D')) +
+#   scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet')) +
+#   theme(plot.title = element_text(size = 18),
+#         legend.title = element_blank(),
+#         legend.position = "bottom",
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.text = element_text(size = 20))
+# 
+
+lvad_list = thoracic_data %>% select(PT_CODE, WL_ID_CODE, INIT_DATE, INIT_STAT, COMPOSITE_DEATH_DATE, INIT_AGE, WL_ORG, END_DATE, REM_CD, CTR_CODE, END_STAT) %>% 
+  filter(INIT_AGE > 18) %>% filter(WL_ORG == "HR") %>% 
+  filter(INIT_DATE >= mdy("10-18-2018") & INIT_DATE <= mdy("01-31-2025")) %>%
+  mutate(
+    TX_DATE = ifelse(REM_CD == 4, END_DATE, NA),
+    TX_DATE = as.Date(TX_DATE, origin = "1970-01-01"))
+
+#merge with candidate list
+lvad_list = lvad_list %>% left_join(lvads) %>% rename("durable_lvad_date" = "IMPLANT_DATE") %>%
+  filter(duplicated(PT_CODE) == FALSE)
+
+discretionary_time = thoracic_stat3 %>% select(WL_ID_CODE, UNOS_CAND_STAT_CD, CRITERIALVADDISCSUPPORT, FORMEFFECTIVEDT) %>% 
+  filter(CRITERIALVADDISCSUPPORT == 1)
+
+lvad_hx_list_episodes = lvad_list %>% filter(durable_lvad_date >= mdy("10-18-2018") & durable_lvad_date <= mdy("01-31-2025")) %>% 
+  mutate(
+    VAD_BRAND = ifelse(VAD_BRAND == "", LVAD_BRAND, VAD_BRAND),
+    INPLACE = ifelse(INPLACE == 0 & MCS_REM_REASON == "Transplanted", 1, INPLACE)) %>%
+  left_join(thoracic_wlhistory_data %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD)) %>% filter(CHG_DATE >= durable_lvad_date) %>%
+  left_join(discretionary_time, by = "WL_ID_CODE")
+
+lvad_hx_list_episodes1 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(all(is.na(CRITERIALVADDISCSUPPORT)))
+
+lvad_hx_list_episodes2 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(any(CRITERIALVADDISCSUPPORT == 1)) %>% filter(UNOS_CAND_STAT_CD.x == UNOS_CAND_STAT_CD.y & CHG_DATE == FORMEFFECTIVEDT)
+
+lvad_hx_list_episodes3 = lvad_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(any(CRITERIALVADDISCSUPPORT == 1)) %>% filter(UNOS_CAND_STAT_CD.x != UNOS_CAND_STAT_CD.y | CHG_DATE != FORMEFFECTIVEDT) %>% slice(1)
+
+lvad_hx_list_episodes = rbind(lvad_hx_list_episodes1, lvad_hx_list_episodes2, lvad_hx_list_episodes3) %>% ungroup() %>% 
+  select(-UNOS_CAND_STAT_CD.y, -FORMEFFECTIVEDT) %>% rename(UNOS_CAND_STAT_CD = UNOS_CAND_STAT_CD.x) %>%
+  group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  mutate(
+    STATUS_CD = ifelse(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 1999, lag(UNOS_CAND_STAT_CD), UNOS_CAND_STAT_CD),
+    STATUS_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) | grepl("1110", UNOS_CAND_STAT_CD) ~ 1,
+      grepl("2120", UNOS_CAND_STAT_CD) | grepl("1120", UNOS_CAND_STAT_CD) ~ 2,
+      grepl("2130", UNOS_CAND_STAT_CD) | grepl("1130", UNOS_CAND_STAT_CD) ~ 3,
+      grepl("2140", UNOS_CAND_STAT_CD) | grepl("1140", UNOS_CAND_STAT_CD) ~ 4,
+      grepl("2150", UNOS_CAND_STAT_CD) | grepl("1150", UNOS_CAND_STAT_CD) ~ 5,
+      grepl("2160", UNOS_CAND_STAT_CD) | grepl("1160", UNOS_CAND_STAT_CD) ~ 6,
+      TRUE ~ NA),
+    index_of_status_change = which(STATUS_CD == 1 | STATUS_CD == 2 | (STATUS_CD == 3 & is.na(CRITERIALVADDISCSUPPORT))) [1])
+ 
+lvad_hx_list1 = lvad_hx_list_episodes %>% filter(is.na(index_of_status_change)) %>% mutate(CANHX_END_DT = last(CHG_DATE)) %>% slice(1)
+ 
+lvad_hx_list2 = lvad_hx_list_episodes %>% filter(!is.na(index_of_status_change)) %>% filter(row_number() <= index_of_status_change) %>%
+  mutate(CANHX_END_DT = last(CHG_DATE) - 1) %>% slice(1)
+ 
+lvad_hx_list = rbind(lvad_hx_list1, lvad_hx_list2) %>% select(-index_of_status_change, -STATUS_CD, -CHG_TY) %>%
+  mutate(
+    CANHX_END_DT = ifelse(CANHX_END_DT > END_DATE, END_DATE, CANHX_END_DT),
+    CANHX_END_DT = as.Date(CANHX_END_DT, origin = "1970-01-01"),
+    OUTCOME = case_when(
+      REM_CD == 4 & CANHX_END_DT == END_DATE & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= CANHX_END_DT) ~ 1,
+      (REM_CD == 13 | REM_CD == 8) & CANHX_END_DT == END_DATE & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= CANHX_END_DT) ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(TX_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 0 & (!is.na(EXPLANT_DATE) & EXPLANT_DATE < CANHX_END_DT) ~ as.numeric(difftime(EXPLANT_DATE, durable_lvad_date, units = "days")),
+      TRUE ~ as.numeric(difftime(CANHX_END_DT, durable_lvad_date, units = "days"))),
+    TIME = ifelse(TIME < 0, 0, TIME),
+    initial_status = "Durable LVAD") 
+
+lvad_transplants = lvad_hx_list %>% filter(REM_CD == 4) %>% filter(INPLACE == 1) %>%
+  mutate(
+    END_STAT = case_when(
+      grepl("2110", END_STAT) | grepl("2010", END_STAT) ~ "1",
+      grepl("2120", END_STAT) ~ "2",
+      grepl("2130", END_STAT) ~ "3",
+      grepl("2140", END_STAT) ~ "4")) %>% group_by(END_STAT) %>% filter(!is.na(END_STAT)) %>%
+  summarise(Count = n()) %>% mutate(percentage = (Count / sum(Count)) * 100)
+
+
+
+
+lvad_hx_list_separate = rbind(lvad_hx_list1, lvad_hx_list2) %>% select(-index_of_status_change, -STATUS_CD, -CHG_TY) %>%
+  mutate(
+    CANHX_END_DT = ifelse(CANHX_END_DT > END_DATE, END_DATE, CANHX_END_DT),
+    CANHX_END_DT = as.Date(CANHX_END_DT, origin = "1970-01-01"),
+    OUTCOME = case_when(
+      REM_CD == 4 & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= END_DATE) ~ 1,
+      (REM_CD == 13 | REM_CD == 8) & (is.na(EXPLANT_DATE) | EXPLANT_DATE >= END_DATE) ~ 2,
+      TRUE ~ 0),
+    TIME = case_when(
+      OUTCOME == 1 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 2 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      OUTCOME == 0 & (!is.na(EXPLANT_DATE) & EXPLANT_DATE < END_DATE) ~ as.numeric(difftime(EXPLANT_DATE, durable_lvad_date, units = "days")),
+      TRUE ~ as.numeric(difftime(CANHX_END_DT, durable_lvad_date, units = "days"))),
+    TIME = ifelse(TIME < 0, 0, TIME),
+    initial_status = "Durable LVAD") 
+
+
+
+
+
+plot1 <- ggplot(lvad_transplants, aes(x = END_STAT, y = Count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")), 
+            vjust = -0.5,
+            size = 6) +
+  labs(title = "Status at Transplant with Durable LVADs", x = "Status at Transplant", y = "Number of Patients") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18, hjust = 1),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+  
+
+lvad_hx_list = lvad_hx_list %>% select(WL_ID_CODE, initial_status, OUTCOME, TIME, durable_lvad_date, VAD_BRAND)
+
+
+cand_hx_list = cand_hx_list %>% select(WL_ID_CODE, initial_status, OUTCOME, TIME) %>% mutate(initial_status = as.character(initial_status))
+
+cand_hx_lvad_list = rbind(cand_hx_list, lvad_hx_list) %>% mutate(TIME_IN_YEARS = TIME / 365.25) 
+
+
+cand_hx_lvad_list$OUTCOME <- factor(cand_hx_lvad_list$OUTCOME,
+                                    levels = c("0", "1", "2"), # Assuming 0 is censored, adjust if different
+                                    labels = c("Censored", "Transplant", "Death or Deterioration")) 
+
+
+
+options("ggsurvfit.switch-color-linetype" = FALSE)
+
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+
+custom_colors <- c("black", "#FA9E4D", "#660000", "#496061") 
+
+
+cif_plot <- survfit2(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = cand_hx_lvad_list) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 0.2),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  xlab("Years after LVAD Implantation") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+cifresults1 <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = as.data.frame(cand_hx_lvad_list)) %>%
+  tbl_cuminc(
+    times = 5,
+    outcomes = c("Transplant", "Death or Deterioration"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10))
+
+cifresults2 <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ initial_status, data = as.data.frame(cand_hx_lvad_list)) %>%
+  tbl_cuminc(
+    times = 1,
+    outcomes = c("Transplant", "Death or Deterioration"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10))
+
+
+status1 = cand_hx_lvad_list %>% filter(initial_status == "1")
+status1totaltime = sum(status1$TIME) / 365.25
+status1deaths = nrow(status1[status1$OUTCOME == "Death or Deterioration", ])
+status1_deaths_person_years = status1deaths / status1totaltime * 100
+
+
+status2 = cand_hx_lvad_list %>% filter(initial_status == "2")
+status2totaltime = sum(status2$TIME) / 365.25
+status2deaths = nrow(status2[status2$OUTCOME == "Death or Deterioration", ])
+status2_deaths_person_years = status2deaths / status2totaltime * 100
+
+status3 = cand_hx_lvad_list %>% filter(initial_status == "3")
+status3totaltime = sum(status3$TIME) / 365.25
+status3deaths = nrow(status3[status3$OUTCOME == "Death or Deterioration", ])
+status3_deaths_person_years = status3deaths / status3totaltime * 100
+
+durable_lvad = lvad_hx_list_separate
+durable_lvad_time = sum(durable_lvad$TIME) / 365.25
+durable_lvad_deaths = nrow(durable_lvad[durable_lvad$OUTCOME == 2, ])
+durable_lvad_deaths_person_years = durable_lvad_deaths / durable_lvad_time * 100
+
+
+
+status3asymptote <- inline_text(cifresults2, time = 1, outcome = "Death or Deterioration", level = "3") %>% substr(1, 12) 
+status3asymptote <- as.double(status3asymptote) / 100
+
+status2asymptote <- inline_text(cifresults2, time = 1, outcome = "Death or Deterioration", level = "2") %>% substr(1, 12) 
+status2asymptote <- as.double(status2asymptote) / 100
+
+status1asymptote <- inline_text(cifresults1, time = 5, outcome = "Death or Deterioration", level = "1") %>% substr(1, 12) 
+status1asymptote <- as.double(status1asymptote) / 100
+
+lvads_only = cand_hx_lvad_list %>% filter(initial_status == "Durable LVAD") %>% 
+  left_join(thoracic_data %>% select(WL_ID_CODE, END_STAT)) 
+
+#lvad_transplants = lvads_only %>% filter(OUTCOME == "Transplant")
+
+cifresults_lvads <- cuminc(Surv(TIME_IN_YEARS, OUTCOME) ~ 1, data = as.data.frame(lvads_only))
+
+ci_data <- data.frame(time = cifresults_lvads[["cmprsk"]][["1 2"]][["time"]], est = cifresults_lvads[["cmprsk"]][["1 2"]][["est"]])
+
+# Find the time at which the cumulative incidence meets the specified rate
+time_at_status3_death <- ci_data$time[which.min(abs(ci_data$est - status3asymptote))]
+time_at_status2_death <- ci_data$time[which.min(abs(ci_data$est - status2asymptote))]
+time_at_status1_death <- ci_data$time[which.min(abs(ci_data$est - status1asymptote))]
+
+print(time_at_status3_death)
+print(time_at_status2_death)
+print(time_at_status1_death)
+
+
+cif_plot_asymptotes <- survfit2(Surv(TIME_IN_YEARS, OUTCOME) ~ 1, data = lvads_only) %>%
+  ggcuminc(
+    outcome = c("Death or Deterioration"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 0.20),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  geom_hline(yintercept = status1asymptote, linetype = 5, color = "green", linewidth = 1) +
+  geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  geom_segment(aes(x = time_at_status1_death, y = 0, yend = status1asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  geom_segment(aes(x = time_at_status2_death, y = 0, yend = status2asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  geom_segment(aes(x = time_at_status3_death, y = 0, yend = status3asymptote), color = "black", linetype = "dotted", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence of Waitlist Removal for\nDeath or Clinical Deterioration") +
+  theme_classic() +
+  #guides(linetype=guide_legend(nrow = 1, byrow=TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+# stat1 = thoracic_stat1 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 1)
+# stat2 = thoracic_stat2 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 2)
+# stat3 = thoracic_stat3 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>% 
+#   mutate(STATUS = 3)
+# stat4 = thoracic_stat4 %>% select(WL_ID_CODE, WLREG_AUDIT_ID_CODE, UNOS_CAND_STAT_CD, UNOS_CAND_STAT_DT, FORMEFFECTIVEDT, FORMSTATUS) %>%
+#   mutate(STATUS = 4)
+# 
+# just_form_hr = rbind(stat1, stat2, stat3, stat4) %>% rename(RequestedCandStatCd = UNOS_CAND_STAT_CD) %>% 
+#   mutate(UniqueID = row_number())
+
+
+
+lvad_hx_list_episodes_justifications = lvad_hx_list_episodes %>% left_join(lvadcomplications, by = "WL_ID_CODE") %>% 
+  ungroup() %>% group_by(WL_ID_CODE, CHG_DATE) %>%
+  mutate(
+    placeholder = case_when(
+      UNOS_CAND_STAT_CD == 2999 | (UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == FORMEFFECTIVEDT) | UNOS_CAND_STAT_CD == 2140 ~ 1,
+      TRUE ~ 0)) %>% filter(placeholder == 1) %>% ungroup() 
+
+lvads1 = lvad_hx_list_episodes_justifications %>% group_by(WL_ID_CODE, CHG_DATE) %>% filter(UNOS_CAND_STAT_CD == 2999 | UNOS_CAND_STAT_CD == 2140) %>% slice(1) %>%
+  mutate(WLREG_AUDIT_ID_CODE = NA, RequestedCandStatCd = NA, FORMEFFECTIVEDT = NA, FORMSTATUS = NA)
+
+lvads2 = lvad_hx_list_episodes_justifications %>% group_by(WL_ID_CODE, CHG_DATE) %>% 
+  filter(UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == FORMEFFECTIVEDT)
+
+
+lvad_hx_list_episodes_justifications = rbind(lvads1, lvads2) %>% ungroup %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE)
+
+
+# status4complications = just_form_hr_stat4 %>% select(PX_ID, JustId, starts_with("Criteria")) %>% 
+#   left_join(just_form_hr %>% select(JustId, Exception, DeviceRecallException, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, IsActiveForm, RequestedCandStatCd), by = "JustId") %>%
+#   mutate(
+#     DeviceRecallException = ifelse(is.na(DeviceRecallException), 0, DeviceRecallException),
+#     Reason_For_Status = case_when(
+#       CriteriaLvadSupport == 1 ~ "LVAD, Status 4",
+#       CriteriaInotropeSupport == 1 ~ "Inotropes, Status 4",
+#       CriteriaHeartDisease == 1 ~ "CHD, Status 4",
+#       CriteriaIschemicHeart == 1 ~ "Ischemic Heart Disease, Status 4",
+#       CriteriaCardiomyopathy == 1 ~ "Cardiomyopathy, Status 4",
+#       CriteriaRetransplant == 1 ~ "Re-Tx, Status 4",
+#       DeviceRecallException == 1 ~ "Device Recall, Status 4",
+#       Exception == 1 ~ "Exception, Status 4")) %>%
+#     select(PX_ID, JustId, FormEffectiveDt, FormExpirationDt, FormStatus_descrip, listing_description, Reason_For_Status, IsActiveForm, RequestedCandStatCd)
+
+
+
+lvad_complications_dataframe = lvad_hx_list_episodes_justifications %>%
+  mutate(
+    Not_Complication = ifelse(Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3" | is.na(Reason_For_Status), 1, 0),
+    ComplicationBinaryCode = case_when(
+      Not_Complication == 0 & RequestedCandStatCd == UNOS_CAND_STAT_CD & CHG_DATE == FORMEFFECTIVEDT ~ 1,
+      TRUE ~ 0),
+    index_of_complication = which(ComplicationBinaryCode == 1) [1],
+    index_of_complication = ifelse(is.na(index_of_complication), 0, index_of_complication),
+    date_of_complication = if_else(index_of_complication == 0, NA, nth(FORMEFFECTIVEDT, first(index_of_complication))),
+    actual_complication = if_else(index_of_complication == 0, NA, nth(Reason_For_Status, first(index_of_complication))),
+    has_index_of_complication = ifelse(all(index_of_complication == 0), 0, 1))
+
+lvad_complications_dataframe1 = lvad_complications_dataframe %>% filter(has_index_of_complication == 0) %>% slice(1)
+
+lvad_complications_dataframe2 = lvad_complications_dataframe %>% filter(has_index_of_complication == 1) %>% 
+  filter(row_number() == index_of_complication)
+
+lvad_complications_dataframe = rbind(lvad_complications_dataframe1, lvad_complications_dataframe2) %>%
+  mutate(
+    complication_outcome = case_when(
+      REM_CD == 4 & is.na(date_of_complication) ~ 1,
+      (REM_CD == 8 | REM_CD == 13) & is.na(date_of_complication) ~ 2,
+      !is.na(date_of_complication) ~ 3,
+      TRUE ~ 0),
+    time_to_complication = case_when(
+      complication_outcome == 1 ~ as.numeric(difftime(TX_DATE, durable_lvad_date, units = "days")),
+      complication_outcome == 2 ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days")),
+      complication_outcome == 3 ~ as.numeric(difftime(date_of_complication, durable_lvad_date, units = "days")),
+      TRUE ~ as.numeric(difftime(END_DATE, durable_lvad_date, units = "days"))),
+    time_to_complication = ifelse(time_to_complication < 0, 0, time_to_complication),
+    time_to_complication_years = time_to_complication / 365.25) %>%
+  select(WL_ID_CODE, durable_lvad_date, VAD_BRAND, END_DATE, Reason_For_Status, date_of_complication, actual_complication, complication_outcome, time_to_complication, time_to_complication_years) %>%
+  mutate(
+    time_at_status1_death_det = time_at_status1_death,
+    time_at_status2_death_det = time_at_status2_death,
+    time_at_status3_death_det = time_at_status3_death)
+    
+missing_ids = lvad_hx_list %>% filter(!WL_ID_CODE %in% lvad_complications_dataframe$WL_ID_CODE) %>%
+  mutate(OUTCOME = as.factor(OUTCOME),
+         time_at_status1_death_det = time_at_status1_death,
+         time_at_status2_death_det = time_at_status2_death,
+         time_at_status3_death_det = time_at_status3_death,
+         Reason_For_Status = NA,
+         date_of_complication = NA,
+         actual_complication = NA,
+         complication_outcome = 0,
+         time_to_complication = TIME,
+         time_to_complication = ifelse(time_to_complication < 0, 0, time_to_complication),
+         time_to_complication_years = time_to_complication / 365.25)
+
+lvad_complications_dataframe = rbind(lvad_complications_dataframe, missing_ids) %>% 
+  mutate(complication_before_status3_time = ifelse(!is.na(actual_complication) & time_to_complication_years <= time_at_status3_death_det, 1, 0),
+         complication_before_status2_time = ifelse(!is.na(actual_complication) & time_to_complication_years <= time_at_status2_death_det, 1, 0),
+         complication_before_status1_time = ifelse(!is.na(actual_complication) & time_to_complication_years <= time_at_status1_death_det, 1, 0),
+         had_complication = ifelse(!is.na(actual_complication), 1, 0)) %>%
+  select(-Reason_For_Status) %>%
+  mutate(VAD_BRAND_TY = ifelse(VAD_BRAND == "HeartMate III", "HeartMate III", "Other LVAD"))
+
+lvad_complications_dataframe$complication_outcome <- factor(lvad_complications_dataframe$complication_outcome,
+                                                            levels = c("0", "1", "2", "3"), 
+                                                            labels = c("Censored", "Transplant without Complication/Status Upgrade",
+                                                                       "Death/Deterioration before Complication/Status Upgrade",
+                                                                       "LVAD Complication/Status Upgrade")) 
+
+
+
+
+
+
+comp1table = table(lvad_complications_dataframe$complication_before_status1_time)
+comp1table = as.data.frame(comp1table)
+
+comp2table = table(lvad_complications_dataframe$complication_before_status2_time)
+comp2table = as.data.frame(comp2table)
+
+comp3table = table(lvad_complications_dataframe$complication_before_status3_time)
+comp3table = as.data.frame(comp3table)
+
+total_lvad = 3681
+total_complications = 1412
+complications = c("Status 3 Threshold", "Status 2 Threshold", "Status 1 Threshold")
+absolutenumber = c(328, 675, 1392)
+percentages = c(328/total_lvad * 100, 675/total_lvad * 100, 1392/total_lvad * 100)
+percentages_of_complications = c(328/total_complications * 100, 675/total_complications * 100, 1392/total_complications * 100)
+complications = as.factor(complications)
+
+df <- data.frame(Complications = complications, AbsoluteNumber = absolutenumber, Percentages = percentages, Percent_Comp = percentages_of_complications)
+
+# Create the barplot
+plot2 <- ggplot(df, aes(x = Complications, y = AbsoluteNumber)) +
+  geom_bar(stat = "identity", fill = "#FA9E4D") +
+  geom_text(aes(label = paste0(sprintf("%.1f", Percent_Comp), "% of Complications/\nStatus Upgrades")), 
+            vjust = -0.5,
+            size = 6) +
+  geom_text(aes(label = paste0("N = ", AbsoluteNumber)), 
+            position = position_stack(vjust = 0.5),
+            size = 6) +
+  labs(title = "",
+       x = "",
+       y = "Absolute Number of Patients with LVADs\nExperiencing Complications/Status Upgrades") +
+  ylim(0, 2000) +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+geom_text(aes(label = channels), color = "white", size = 3, position = position_stack(vjust = 0.5)) + 
+  theme_minimal()
+
+complications_only = lvad_complications_dataframe %>% filter(!is.na(actual_complication)) %>%
+  select(WL_ID_CODE, VAD_BRAND_TY, actual_complication, time_to_complication) %>%
+  mutate(
+    status1 = case_when(
+      grepl("Status 1", actual_complication) ~ actual_complication,
+      TRUE ~ NA),
+    status1 = str_sub(status1, end = -11),
+    status1 = case_when(
+      status1 == "BIVAD" ~ "Non-Dischargeable Surgical BIVAD",
+      status1 == "Life Threatening Ventricular Arrhythmia" ~ "MCS with Life Threatening Ventricular Arrhythmia",
+      TRUE ~ status1),
+    status2 = case_when(
+      grepl("Status 2", actual_complication) ~ actual_complication,
+      TRUE ~ NA),
+    status2 = str_sub(status2, end = -11),
+    status2 = case_when(
+      status2 == "TAH/BIVAD/RVAD" ~ "TAH, RVAD, VAD for Single Ventricle Patients, or BiVAD",
+      status2 == "Recurrent VT/VF" ~ "Recurrent or Sustained VT/VF",
+      TRUE ~ status2),
+    status3 = case_when(
+      grepl("Status 3", actual_complication) ~ actual_complication,
+      TRUE ~ NA),
+    status3 = str_sub(status3, end = -11),
+    status3 = case_when(
+      status3 == "Aortic Insufficiency" ~ "MCS with Aortic Insufficiency",
+      status3 == "Hemolysis" ~ "MCS with Hemolysis",
+      status3 == "Mucosal Bleeding" ~ "MCS with Mucosal Bleeding",
+      status3 == "Pump Thrombosis" ~ "MCS with Pump Thrombosis",
+      status3 == "Right Heart Failure" ~ "MCS with Right Heart Failure",
+      status3 == "Inotropes" ~ "Continuous IV Inotropes",
+      TRUE ~ status3))
+
+
+status1complication = complications_only %>% filter(!is.na(status1))
+status2complication = complications_only %>% filter(!is.na(status2))
+status3complication = complications_only %>% filter(!is.na(status3))
+
+complicationmedian = median(complications_only$time_to_complication)
+
+complicationquantiles = quantile(complications_only$time_to_complication, probs = c(0.25, 0.5, 0.75, 1))
+
+
+
+var_label_list_complications <- list(status1 = "Reason for Status 1 Upgrade",
+                                     status2 = "Reason for Status 2 Upgrade",
+                                     status3 = "Reason for Status 3 Upgrade",
+                                     VAD_BRAND_TY = "Durable LVAD Type")
+labelled::var_label(complications_only) <- var_label_list_complications
+
+
+complications_only %>% ungroup() %>%
+  dplyr::select(
+    VAD_BRAND_TY, status1, status2, status3) %>%
+  tbl_summary(by = VAD_BRAND_TY, digits = list(all_categorical() ~ c(0, 1))) %>%
+  
+  #tbl_summary(by = FormStatus_descrip, digits = list(all_categorical() ~ c(0, 1))) %>%
+
+  #add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  #remove_row_type(variables = c(pcwp, cardiac_index), type = "missing", level_value = ("(Missing)")) %>%
+  remove_row_type(variables = c(status1, status2, status3), type = "missing", level_value = ("(Unknown)")) %>%
+  as_gt()
+
+
+```
+
+
+
+``` {r complication plot}
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+
+complication_plot <- survfit2(Surv(time_to_complication_years, complication_outcome) ~ 1, data = lvad_complications_dataframe) %>%
+  ggcuminc(
+    outcome = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  #geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  #geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status3_death, linetype = "dotted", color = "black", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status2_death, linetype = "dotted", color = "black", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  theme_classic() +
+  guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+complication_plot_with_vad_brand <- survfit2(Surv(time_to_complication_years, complication_outcome) ~ VAD_BRAND_TY, 
+                                             data = lvad_complications_dataframe) %>%
+  ggcuminc(
+    outcome = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    linewidth = 1) + 
+  add_confidence_interval(alpha = 0.25) +
+  add_risktable(size = 7, theme = theme_risktable_default(plot.title.size = 18, axis.text.y.size = 18)) +
+  coord_cartesian(xlim = c(0, 5)) +
+  #scale_x_continuous(breaks = c(0, 45, 90, 135, 180)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  #geom_hline(yintercept = status2asymptote, linetype = 5, color = "red", linewidth = 1) +
+  #geom_hline(yintercept = status3asymptote, linetype = 5, color = "blue", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status3_death, linetype = "dotted", color = "black", linewidth = 1) +
+  #geom_vline(xintercept = time_at_status2_death, linetype = "dotted", color = "black", linewidth = 1) +
+  xlab("Years after LVAD Implantation") +
+  ylab("Cumulative Incidence") +
+  theme_classic() +
+  guides(color = guide_legend(nrow = 3, byrow = TRUE)) +
+  #guides(color = guide_legend(nrow = 1, byrow=TRUE)) +
+  scale_color_manual(values = c('black', 'darkred', '#FA9E4D', "#496061")) +
+  scale_fill_manual(values = c('#54738E', '#82AC7C', 'violet', "#8dd9d7")) +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20)) +
+  annotate("text", x = 0, y = 0.95, hjust = 0, size = 6,
+           label = paste0(
+             "Death/Deterioration p: ", 0.02)) + 
+  annotate("text", x = 0, y = 0.88, hjust = 0, size = 6,
+           label = paste0(
+             "Transplant p: ", 0.2)) + 
+  annotate("text", x = 0, y = 0.81, hjust = 0, size = 6,
+           label = paste0(
+             "LVAD Complication/Status Upgrade p: ", "< 0.001"))
+
+
+cifresults_complication <- cuminc(Surv(time_to_complication_years, complication_outcome) ~ VAD_BRAND_TY, 
+                                  data = as.data.frame(lvad_complications_dataframe)) %>%
+  tbl_cuminc(
+    times = 5,
+    outcomes = c("Transplant without Complication/Status Upgrade", 
+                "Death/Deterioration before Complication/Status Upgrade", "LVAD Complication/Status Upgrade"),
+    estimate_fun = gtsummary::label_style_number(scale = 100, digits = 10)) %>% add_p()
+
+
+
+plot3 <- ggplot(lvad_complications_dataframe, aes(x = time_to_complication)) +
+  geom_histogram(fill = "lightblue") +
+  labs(title = "", y = "Number of Patients", x = "Time to Complication in Days") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 18),
+        legend.title = element_blank(),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20))
+
+
+# is.na(Reason_For_Status) | Reason_For_Status == "ECMO, Status 1" | Reason_For_Status == "BIVAD, Status 1" | Reason_For_Status == "Exception, Status 1" | Reason_For_Status == "Exception, Status 2" | Reason_For_Status == "Recurrent VT/VF, Status 2" | Reason_For_Status == "IABP, Status 2" | Reason_For_Status == "PEVAD, Status 2" | Reason_For_Status == "TAH/BIVAD/RVAD, Status 2" | Reason_For_Status == "Non-Dischargeable LVAD, Status 2" | Reason_For_Status == "VA ECMO after 7 Days, Status 3" | Reason_For_Status == "Inotropes" | Reason_For_Status == "PEVAD after 2 Weeks, Status 3" | Reason_For_Status == "IABP after 2 Weeks, Status 3" | Reason_For_Status == "LVAD with Life Threatening VA after 7 Days, Status 3" | Reason_For_Status == "Non-Dischargeable LVAD after 2 Weeks, Status 3" | Reason_For_Status == "Discretionary 30 Days with LVAD, Status 3" | Reason_For_Status == "Exception, Status 3" | Reason_For_Status == "LVAD, Status 4" | Reason_For_Status == "Inotropes, Status 4" | Reason_For_Status == "CHD, Status 4" | Reason_For_Status == "Ischemic Heart Disease, Status 4" | Reason_For_Status == "Cardiomyopathy, Status 4" | Reason_For_Status == "Re-Tx, Status 4" | Reason_For_Status == "Exception, Status 4"
+#     
+    # index_of_complication = which(ComplicationBinaryCode == 1) [1],
+    # index_of_complication = ifelse(is.na(index_of_complication), 0, index_of_complication),
+    # date_of_complication = if_else(index_of_complication == 0, NA, nth(FormEffectiveDt, first(index_of_complication))),
+    # Outcome = case_when(
+    #   !is.na(date_of_complication) ~ 1,
+    #   is.na(date_of_complication) & !is.na(REC_TX_DT) ~ 2,
+    #   is.na(date_of_complication) & (CAN_REM_CD == 8 | CAN_REM_CD == 13) ~ 3,
+    #   TRUE ~ 0))
+
+
+
+```
+
+
+``` {r bar graph}
+
+lvads_all_time = thoracic_mcs_device %>% 
+  select(WL_ID_CODE, DEVICE_TYPE, LVAD_BRAND, VAD_BRAND, VENTRICULAR_SUPPORT, IMPLANT_DATE, EXPLANT_DATE, INPLACE, MCS_REM_REASON) %>%
+  filter(DEVICE_TYPE == "Dischargeable VAD" | (DEVICE_TYPE == "LVAD" & grepl(paste(lvad_keywords, collapse = "|"), LVAD_BRAND, ignore.case = TRUE))) %>%
+  filter(EXPLANT_DATE >= mdy("02-01-2025") | is.na(EXPLANT_DATE)) %>% filter(IMPLANT_DATE <= mdy("02-01-2025"))
+
+
+cand_list_bargraph = thoracic_data %>% select(WL_ID_CODE, INIT_DATE, END_DATE, INIT_AGE, WL_ORG) %>% 
+  filter(INIT_AGE >= 18) %>% filter(WL_ORG == "HR") %>% filter(END_DATE > mdy("01-31-2025")) %>% filter(INIT_DATE < mdy("02-02-2025")) %>%
+  left_join(thoracic_wlhistory_data %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD)) %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>%
+  filter(CHG_TY == "M") %>%
+  mutate(
+    CHG_END_DATE = lead(CHG_DATE) - 1,
+    CHG_END_DATE = ifelse(is.na(CHG_END_DATE), END_DATE, CHG_END_DATE),
+    CHG_END_DATE = as.Date(CHG_END_DATE, origin = "1970-01-01"),
+    ON_DATE = ifelse(CHG_DATE <= mdy("02-01-2025") & CHG_END_DATE >= mdy("02-01-2025"), 1, 0)) %>%
+  filter(ON_DATE == 1) %>% 
+  left_join(lvads_all_time) %>% 
+  mutate(
+    TIME_ON_LVAD = as.numeric(difftime(mdy("02-01-2025"), IMPLANT_DATE, units = "days")),
+    calculated_status3 = time_at_status3_death * 365.25,
+    calculated_status2 = time_at_status2_death * 365.25,
+    calculated_status1 = time_at_status1_death * 365.25,
+    policy_status3_phase1 = 6 * 365.25,
+    policy_status2_phase1 = 8 * 365.25,
+    policy_status3_phase2 = 5 * 365.25,
+    policy_status2_phase2 = 7 * 365.25,
+    NEW_STAT_CD_CALCULATED = case_when(
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status3 & 
+        TIME_ON_LVAD < calculated_status2 & UNOS_CAND_STAT_CD >= 2130 ~ 2130,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status3 & 
+        TIME_ON_LVAD < calculated_status1 & UNOS_CAND_STAT_CD >= 2120 ~ 2120,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= calculated_status1 & 
+        UNOS_CAND_STAT_CD >= 2110 ~ 2110,
+      TRUE ~ UNOS_CAND_STAT_CD),
+    NEW_STAT_CD_POLICY_PHASE1 = case_when(
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status3_phase1 & 
+        TIME_ON_LVAD < policy_status2_phase1 & UNOS_CAND_STAT_CD >= 2130 ~ 2130,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status2_phase1 & 
+        UNOS_CAND_STAT_CD >= 2120 ~ 2120,
+      TRUE ~ UNOS_CAND_STAT_CD),
+    NEW_STAT_CD_POLICY_PHASE2 = case_when(
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status3_phase2 & 
+        TIME_ON_LVAD < policy_status2_phase2 & UNOS_CAND_STAT_CD >= 2130 ~ 2130,
+      !is.na(DEVICE_TYPE) & UNOS_CAND_STAT_CD != 2999 & TIME_ON_LVAD >= policy_status2_phase2 & 
+        UNOS_CAND_STAT_CD >= 2120 ~ 2120,
+      TRUE ~ UNOS_CAND_STAT_CD),
+    LVAD = ifelse(!is.na(DEVICE_TYPE), "LVAD", "No LVAD"),
+    UNOS_CAND_STAT_CD = case_when(
+      grepl("2110", UNOS_CAND_STAT_CD) ~ "1",
+      grepl("2120", UNOS_CAND_STAT_CD) ~ "2",
+      grepl("2130", UNOS_CAND_STAT_CD) ~ "3",
+      grepl("2140", UNOS_CAND_STAT_CD) ~ "4",
+      grepl("2150", UNOS_CAND_STAT_CD) ~ "5",
+      grepl("2160", UNOS_CAND_STAT_CD) ~ "6",
+      TRUE ~ "Inactive"),
+    NEW_STAT_CD_CALCULATED = case_when(
+      grepl("2110", NEW_STAT_CD_CALCULATED) ~ "1",
+      grepl("2120", NEW_STAT_CD_CALCULATED) ~ "2",
+      grepl("2130", NEW_STAT_CD_CALCULATED) ~ "3",
+      grepl("2140", NEW_STAT_CD_CALCULATED) ~ "4",
+      grepl("2150", NEW_STAT_CD_CALCULATED) ~ "5",
+      grepl("2160", NEW_STAT_CD_CALCULATED) ~ "6",
+      TRUE ~ "Inactive"),
+    NEW_STAT_CD_POLICY_PHASE1 = case_when(
+      grepl("2110", NEW_STAT_CD_POLICY_PHASE1) ~ "1",
+      grepl("2120", NEW_STAT_CD_POLICY_PHASE1) ~ "2",
+      grepl("2130", NEW_STAT_CD_POLICY_PHASE1) ~ "3",
+      grepl("2140", NEW_STAT_CD_POLICY_PHASE1) ~ "4",
+      grepl("2150", NEW_STAT_CD_POLICY_PHASE1) ~ "5",
+      grepl("2160", NEW_STAT_CD_POLICY_PHASE1) ~ "6",
+      TRUE ~ "Inactive"),
+    NEW_STAT_CD_POLICY_PHASE2 = case_when(
+      grepl("2110", NEW_STAT_CD_POLICY_PHASE2) ~ "1",
+      grepl("2120", NEW_STAT_CD_POLICY_PHASE2) ~ "2",
+      grepl("2130", NEW_STAT_CD_POLICY_PHASE2) ~ "3",
+      grepl("2140", NEW_STAT_CD_POLICY_PHASE2) ~ "4",
+      grepl("2150", NEW_STAT_CD_POLICY_PHASE2) ~ "5",
+      grepl("2160", NEW_STAT_CD_POLICY_PHASE2) ~ "6",
+      TRUE ~ "Inactive")) %>% ungroup() %>%
+  select(LVAD, UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY_PHASE1, NEW_STAT_CD_POLICY_PHASE2)
+
+
+
+
+data_long <- cand_list_bargraph %>%
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY_PHASE1, NEW_STAT_CD_POLICY_PHASE2) %>%
+  pivot_longer(cols = everything(), names_to = "Status_Type", values_to = "Status_Value")
+
+# Count the number of patients for each status type
+count_data <- data_long %>%
+  group_by(Status_Type, Status_Value) %>%
+  summarise(Count = n()) %>%
+  mutate(percentage = (Count / sum(Count)) * 100)
+
+count_data$Status_Type <- factor(count_data$Status_Type,
+levels = c("UNOS_CAND_STAT_CD", "NEW_STAT_CD_CALCULATED", "NEW_STAT_CD_POLICY_PHASE1", "NEW_STAT_CD_POLICY_PHASE2"), 
+labels = c("Actual Waiting List\non February 1, 2025", "Estimated Thresholds", "September 2026\nPolicy, Phase 1", "September 2026\nPolicy, Phase 2")) 
+
+# Create the bar plot with Status_Type on the x-axis
+barplot = ggplot(count_data, aes(x = Status_Type, y = Count, fill = Status_Value)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  geom_text(data = subset(count_data, !(Status_Value == "1")), 
+            aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")), 
+            position = position_stack(vjust = 0.5),
+            size = 6) +
+  geom_text(data = subset(count_data, Status_Value == "1"),
+            aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")),
+            y = 3100,
+            stat = "identity",
+            size = 6) +
+  labs(title = "",
+       x = "Policy Type",
+       y = "Number of Patients on Adult Heart Waitlist") +
+  theme_classic() +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = guide_legend(title = "Status Level")) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+has_lvad = cand_list_bargraph %>% filter(LVAD == "LVAD") %>% 
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY_PHASE1, NEW_STAT_CD_POLICY_PHASE2)
+
+data_long_just_lvad <- has_lvad %>%
+  select(UNOS_CAND_STAT_CD, NEW_STAT_CD_CALCULATED, NEW_STAT_CD_POLICY_PHASE1, NEW_STAT_CD_POLICY_PHASE2) %>%
+  pivot_longer(cols = everything(), names_to = "Status_Type", values_to = "Status_Value")
+
+# Count the number of patients for each status type
+count_data_just_lvad <- data_long_just_lvad %>%
+  group_by(Status_Type, Status_Value) %>%
+  summarise(Count = n()) %>%
+  mutate(percentage = (Count / sum(Count)) * 100)
+
+count_data_just_lvad$Status_Type <- factor(count_data_just_lvad$Status_Type,
+                                           levels = c("UNOS_CAND_STAT_CD", "NEW_STAT_CD_CALCULATED", "NEW_STAT_CD_POLICY_PHASE1",
+                                                      "NEW_STAT_CD_POLICY_PHASE2"), 
+                                           labels = c("Actual Waiting List\non February 1, 2025", 
+                                                      "Estimated Thresholds", "September 2026\nPolicy, Phase 1", 
+                                                      "September 2026\nPolicy, Phase 2")) 
+
+
+barplot_just_lvads = ggplot(count_data_just_lvad, aes(x = Status_Type, y = Count, fill = Status_Value)) +
+  geom_bar(stat = "identity", position = "stack", color = "black") +
+  geom_text(aes(label = paste0(Count, " (", sprintf("%.1f", percentage), "%)")), 
+            position = position_stack(vjust = 0.5),
+            size = 6) +
+  labs(title = "",
+       x = "Policy Type",
+       y = "Number of Patients with Durable\nLVADs on Adult Heart Waitlist") +
+  theme_classic() +
+  scale_fill_brewer(palette = "Set1") +
+  guides(fill = guide_legend(title = "Status Level")) +
+  theme(plot.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+```
