@@ -1,0 +1,239 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r nhrb and exception interaction}
+
+#this code creates supplemental figures 7 and 8
+
+cand_hx_list_episodes_pre_nhrb = cand_hx_list_episodes_grouping %>% filter(period == "pre-nhrb") %>%
+  filter(CHG_DATE <= mdy("05-31-2021")) %>%
+  mutate(
+    death = case_when(
+      death == 1 & CHG_END_DATE > mdy("05-31-2021") ~ 0,
+      TRUE ~ death),
+    transplant = case_when(
+      transplant == 1 & CHG_END_DATE > mdy("05-31-2021") ~ 0,
+      TRUE ~ transplant))
+
+
+cand_hx_list_episodes_post_nhrb = cand_hx_list_episodes_grouping %>% filter(period == "post-nhrb") %>%
+  filter(CHG_DATE <= mdy("05-31-2025")) %>%
+  mutate(
+    death = case_when(
+      death == 1 & CHG_END_DATE > mdy("05-31-2025") ~ 0,
+      TRUE ~ death),
+    transplant = case_when(
+      transplant == 1 & CHG_END_DATE > mdy("05-31-2025") ~ 0,
+      TRUE ~ transplant))
+
+nhrb_data = rbind(cand_hx_list_episodes_pre_nhrb, cand_hx_list_episodes_post_nhrb)
+
+
+interaction_model <- coxme(Surv(start, end, death) ~ EXCEPTION * period + STATUS + EXCEPTION + period + (1 | LISTING_CTR_CODE), data = nhrb_data)
+
+summary(interaction_model)
+exp(confint(interaction_model))
+
+
+interaction_model_plot = plot_model(
+  interaction_model,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c(
+    "Exception & Cohort Interaction",
+    "Status (Ref 2): 1A",
+    "Status (Ref 2): 1B",
+    "Policy Cohort: Pre NHRB",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+
+
+library(emmeans)
+library(ggplot2)
+
+# Get estimated marginal means
+emm <- emmeans(interaction_model, ~ EXCEPTION | period, type = "response")
+emm_df <- as.data.frame(emm)
+
+# Make sure EXCEPTION is a factor and relevel period
+emm_df$EXCEPTION <- factor(emm_df$EXCEPTION, 
+                           levels = c(0, 1),
+                           labels = c("No Exception", "Exception"))
+emm_df$period <- factor(emm_df$period, 
+                        levels = c("pre-nhrb", "post-nhrb"),
+                        labels = c("Pre-NHRB", "Post-NHRB"))
+
+ggplot(emm_df, aes(x = period, y = response, 
+                   color = EXCEPTION, group = EXCEPTION)) +
+  geom_point(size = 4, position = position_dodge(0.2)) +
+  geom_line(linewidth = 1.2, position = position_dodge(0.2)) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), 
+                width = 0.2, linewidth = 1, position = position_dodge(0.2)) +
+  scale_color_manual(values = c("No Exception" = "#374e55", 
+                                 "Exception" = "#00a1d5")) +
+  labs(x = "Policy Period", 
+       y = "Predicted Hazard",
+       color = "Exception Status") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "bottom")
+
+
+```
+
+
+``` {r exceptions figure}
+
+#THIS CODE CREATES FIGURE 3
+
+heart_transplants = fortable1 %>% filter(REM_CD == 4)
+
+
+calculations_for_heart_transplants <- heart_transplants %>% 
+  mutate(EXCEPTION = ifelse(is.na(EXCEPTION), 0, EXCEPTION)) %>%
+  select(WL_ID_CODE, period, EXCEPTION) %>% ungroup() %>% 
+  group_by(period) %>% summarise(transplants = n(), exceptions_at_transplant = sum(EXCEPTION), na.rm = TRUE) %>%
+  mutate(exceptionproportion = exceptions_at_transplant / transplants) 
+
+calculations_for_heart_transplants <- calculations_for_heart_transplants %>% filter(period != "other")
+
+calculations_for_heart_transplants %>% select(transplants, exceptions_at_transplant) %>% chisq.test()
+
+
+exception_at_heart_transplant <- heart_transplants %>% filter(EXCEPTION == 1) %>%
+  mutate(
+    EXCEPTION_STATUS = case_when(
+      EXCEPTION == 1 ~ "1A/1B Exception at Time of Transplant")) %>% select(WL_ID_CODE, period, EXCEPTION, EXCEPTION_STATUS, TX_DATE)
+
+total <- heart_transplants %>% mutate(EXCEPTION_STATUS = "Total") %>% select(WL_ID_CODE, period, EXCEPTION, EXCEPTION_STATUS, TX_DATE)
+
+
+  
+barplotdata <- rbind(exception_at_heart_transplant, total) %>% filter(TX_DATE >= mdy("04-01-2016") & TX_DATE <= mdy("06-30-2025")) %>%
+  mutate(
+    status = factor(EXCEPTION_STATUS, levels = c("Total", "1A/1B Exception at Time of Transplant"))) %>%
+  mutate(
+    timing_of_transplants = case_when(
+      TX_DATE >= mdy("04-01-2016") & TX_DATE <= mdy("06-30-2016") ~ "Apr-Jun 2016",
+      TX_DATE >= mdy("07-01-2016") & TX_DATE <= mdy("09-30-2016") ~ "Jul-Sep 2016",
+      TX_DATE >= mdy("10-01-2016") & TX_DATE <= mdy("12-31-2016") ~ "Oct-Dec 2016",
+      TX_DATE >= mdy("01-01-2017") & TX_DATE <= mdy("03-31-2017") ~ "Jan-Mar 2017",
+      TX_DATE >= mdy("04-01-2017") & TX_DATE <= mdy("06-30-2017") ~ "Apr-Jun 2017",
+      TX_DATE >= mdy("07-01-2017") & TX_DATE <= mdy("09-30-2017") ~ "Jul-Sep 2017",
+      TX_DATE >= mdy("10-01-2017") & TX_DATE <= mdy("12-31-2017") ~ "Oct-Dec 2017",
+      TX_DATE >= mdy("01-01-2018") & TX_DATE <= mdy("03-31-2018") ~ "Jan-Mar 2018",
+      TX_DATE >= mdy("04-01-2018") & TX_DATE <= mdy("06-30-2018") ~ "Apr-Jun 2018",
+      TX_DATE >= mdy("07-01-2018") & TX_DATE <= mdy("09-30-2018") ~ "Jul-Sep 2018",
+      TX_DATE >= mdy("10-01-2018") & TX_DATE <= mdy("12-31-2018") ~ "Oct-Dec 2018",
+      TX_DATE >= mdy("01-01-2019") & TX_DATE <= mdy("03-31-2019") ~ "Jan-Mar 2019",
+      TX_DATE >= mdy("04-01-2019") & TX_DATE <= mdy("06-30-2019") ~ "Apr-Jun 2019",
+      TX_DATE >= mdy("07-01-2019") & TX_DATE <= mdy("09-30-2019") ~ "Jul-Sep 2019",
+      TX_DATE >= mdy("10-01-2019") & TX_DATE <= mdy("12-31-2019") ~ "Oct-Dec 2019",
+      TX_DATE >= mdy("01-01-2020") & TX_DATE <= mdy("03-31-2020") ~ "Jan-Mar 2020",
+      TX_DATE >= mdy("04-01-2020") & TX_DATE <= mdy("06-30-2020") ~ "Apr-Jun 2020",
+      TX_DATE >= mdy("07-01-2020") & TX_DATE <= mdy("09-30-2020") ~ "Jul-Sep 2020",
+      TX_DATE >= mdy("10-01-2020") & TX_DATE <= mdy("12-31-2020") ~ "Oct-Dec 2020",
+      TX_DATE >= mdy("01-01-2021") & TX_DATE <= mdy("03-31-2021") ~ "Jan-Mar 2021",
+      TX_DATE >= mdy("04-01-2021") & TX_DATE <= mdy("04-30-2021") ~ "Apr 2021",
+      TX_DATE >= mdy("05-01-2021") & TX_DATE <= mdy("05-31-2021") ~ "May 2021",
+      TX_DATE >= mdy("06-01-2021") & TX_DATE <= mdy("06-30-2021") ~ "Jun 2021",
+      TX_DATE >= mdy("07-01-2021") & TX_DATE <= mdy("09-30-2021") ~ "Jul-Sep 2021",
+      TX_DATE >= mdy("10-01-2021") & TX_DATE <= mdy("12-31-2021") ~ "Oct-Dec 2021",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2022") ~ "Jan-Mar 2022",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2022") ~ "Apr-Jun 2022",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2022") ~ "Jul-Sep 2022",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2022") ~ "Oct-Dec 2022",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2023") ~ "Jan-Mar 2023",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2023") ~ "Apr-Jun 2023",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2023") ~ "Jul-Sep 2023",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2023") ~ "Oct-Dec 2023",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2024") ~ "Jan-Mar 2024",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2024") ~ "Apr-Jun 2024",
+      TX_DATE >= mdy("07-01-2022") & TX_DATE <= mdy("09-30-2024") ~ "Jul-Sep 2024",
+      TX_DATE >= mdy("10-01-2022") & TX_DATE <= mdy("12-31-2024") ~ "Oct-Dec 2024",
+      TX_DATE >= mdy("01-01-2022") & TX_DATE <= mdy("03-31-2025") ~ "Jan-Mar 2025",
+      TX_DATE >= mdy("04-01-2022") & TX_DATE <= mdy("06-30-2025") ~ "Apr-Jun 2025"),
+    timing_of_transplants = factor(timing_of_transplants, levels = c("Apr-Jun 2016", "Jul-Sep 2016", "Oct-Dec 2016", "Jan-Mar 2017", "Apr-Jun 2017", "Jul-Sep 2017", "Oct-Dec 2017", "Jan-Mar 2018", "Apr-Jun 2018", "Jul-Sep 2018", "Oct-Dec 2018", "Jan-Mar 2019", "Apr-Jun 2019", "Jul-Sep 2019", "Oct-Dec 2019", "Jan-Mar 2020", "Apr-Jun 2020", "Jul-Sep 2020", "Oct-Dec 2020", "Jan-Mar 2021", "Apr 2021", "May 2021", "Jun 2021", "Jul-Sep 2021", "Oct-Dec 2021", "Jan-Mar 2022", "Apr-Jun 2022", "Jul-Sep 2022", "Oct-Dec 2022", "Jan-Mar 2023", "Apr-Jun 2023", "Jul-Sep 2023", "Oct-Dec 2023", "Jan-Mar 2024", "Apr-Jun 2024", "Jul-Sep 2024", "Oct-Dec 2024", "Jan-Mar 2025", "Apr-Jun 2025")))
+
+
+
+by_month <- barplotdata %>%
+  group_by(timing_of_transplants) %>%
+  count(status) %>%
+  mutate(total_per_month = sum(n)) %>%
+  ungroup() %>%
+  mutate(percentage_per_month = 100*n/total_per_month) 
+# policy_switch <- which(levels(by_month$month) == "Jun 2021")
+# pre_policy_start <- which(levels(by_month$month) == "Jul 2017")
+# pre_policy_end <- which(levels(by_month$month) == "Feb 2021")
+# post_policy_start <- which(levels(by_month$month) == "Jul 2021")
+# post_policy_end <- which(levels(by_month$month) == "Feb 2025")
+
+
+exceptions_at_transplant_barplot <- ggplot(by_month, aes(x = timing_of_transplants, y = percentage_per_month, fill = status, group = status)) +
+  geom_col(alpha = 0.75, color = "NA") +
+  geom_vline(aes(xintercept = "Jun 2021", linetype = "NHRB Implementation Date")) + 
+  #scale_color_custom(name = "Exception Status at Transplant", palette = "simple") +
+  labs(
+    x = "",
+    y = "% Exceptions at Transplant",
+    linetype = "",
+    fill = "status") +
+  scale_y_continuous(limits = c(0, 30), breaks = seq(0, 300, by = 10)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 16),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18),
+        legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.margin = margin(t=0, r=0, b=0, l=0, unit = "mm"),
+        legend.direction = "vertical",
+        legend.title.align = 0,
+        panel.background = element_rect(fill = "grey99"),
+        plot.background = element_rect(fill = "white"),
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(linewidth = 0.5, linetype = "solid", colour = "black")
+  ) +
+  scale_linetype_manual(values = c("dashed", "dotted", "solid")) +
+  scale_fill_manual(name = "", values = c("#b24745", "white"), breaks = c("Status 1A/1B Exception")) + 
+  guides(fill = guide_legend(nrow = 2)) +
+  annotate("text", x = "Apr-Jun 2019", y = 28, label= "Pre-NHRB Cohort", size = 16/.pt) +
+  annotate("text", x = "Apr-Jun 2023", y = 28, label= "Post-NHRB Cohort", size = 16/.pt) +
+  annotate("rect",
+           xmin = "Jul-Sep 2017",           
+           xmax = "Jan-Mar 2021",
+           ymin = 0, 
+           ymax = 30,  
+           alpha = 0.15) +
+  annotate("rect",
+           xmin = "Jul-Sep 2021",            
+           xmax = "Jan-Mar 2025",            
+           ymin = 0, 
+           ymax = 30, 
+           alpha = 0.15) 
+
+
+
+```

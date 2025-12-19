@@ -1,0 +1,301 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r LOGISTIC REGRESSION}
+
+#The following code is for the construction of our mixed-effects logistric regression model. 
+
+library(lme4)
+
+exception_logit = glmer(REC_EXCEPTION_EVER ~ sex + race + age_group + blood_type_dummy + weight_group + diagnosis_dummy +
+                          (1 | LISTING_CTR_CODE),
+                        data = fortable1, family = binomial(link = "logit"))
+
+exp(fixef(exception_logit))
+exp(confint(exception_logit, method = "Wald", parm = "beta_"))
+
+# Or get formatted table
+tab_model(exception_logit, 
+          show.re.var = TRUE,  # Show random effect variance
+          show.icc = TRUE)      # Show ICC
+
+labels_reversed = rev(c("Sex (Ref Male): Female",
+                           "Race (Ref White): Black",
+                           "Race (Ref White): Hispanic/Latino",
+                           "Race (Ref White): Asian",
+                           "Race (Ref White): Other",
+                           "Age Group (Ref < 1 Year): 1-4 Years",
+                           "Age Group (Ref < 1 Year): 5-11 Years",
+                           "Age Group (Ref < 1 Year): >11 Years",
+                           "Blood Type (Ref Non-O): O",
+                           "Weight Group (Ref 25 kg or More): <25 kg",
+                           "Dignosis (Ref DCM): CHD",
+                           "Dignosis (Ref DCM): Re-Transplant",
+                           "Dignosis (Ref DCM): Other"))
+
+plot_model(exception_logit, 
+           show.values = TRUE,
+           value.offset = 0.3,
+           value.size = 6,
+           order.terms = c(1:13),
+           axis.lim = c(0.5, 10),
+           grid.breaks = c(0.5, 1, 5, 10),
+           axis.labels = labels_reversed,
+           title = "Odds Ratios for Exception Receipt") +
+  theme_classic() +
+  theme(text = element_text(size = 18),
+        axis.text.x = element_text(size = 16),
+        axis.title.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18),
+        legend.text = element_text(size = 18),
+        legend.title = element_text(size = 18)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+
+
+library(lme4)
+library(DHARMa)
+library(car)
+library(dplyr)
+
+exception_logit <- glmer(REC_EXCEPTION_EVER ~ sex + race + age_group + 
+                          blood_type_dummy + weight_group + diagnosis_dummy +
+                          (1 | LISTING_CTR_CODE),
+                        data = fortable1, 
+                        family = binomial(link = "logit"),
+                        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+
+```
+
+``` {r logistic regression model testing}
+#The following code is for model assumptions testing
+
+
+# ===== 1. CHECK OVERALL MODEL FIT =====
+# DHARMa residuals
+sim_resid <- simulateResiduals(exception_logit, n = 1000)
+plot(sim_resid)  # QQ plot and residuals vs predicted
+# p > 0.05 = good fit
+
+testDispersion(sim_resid)  # Should be > 0.05
+testOutliers(sim_resid)    # Should be > 0.05
+
+testCategorical(sim_resid, catPred = fortable1$sex)
+testCategorical(sim_resid, catPred = fortable1$race)
+testCategorical(sim_resid, catPred = fortable1$age_group)
+
+
+sens_exception_logit <- glmer(REC_EXCEPTION_EVER ~ sex + race + age_group + blood_type_dummy + weight_group + diagnosis_dummy + age_group * diagnosis_dummy + (1 | LISTING_CTR_CODE), data = fortable1, family = binomial(link = "logit"), control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+
+labels_reversed = rev(c("Sex (Ref Male): Female",
+                        "Race (Ref White): Black",
+                        "Race (Ref White): Hispanic/Latino",
+                        "Race (Ref White): Asian",
+                        "Race (Ref White): Other",
+                        "Age Group (Ref < 1 Year): 1-4 Years",
+                        "Age Group (Ref < 1 Year): 5-11 Years",
+                        "Age Group (Ref < 1 Year): >11 Years",
+                        "Blood Type (Ref Non-O): O",
+                        "Weight Group (Ref 25 kg or More): <25 kg",
+                        "Diagnosis (Ref DCM): CHD",
+                        "Diagnosis (Ref DCM): Re-Transplant",
+                        "Diagnosis (Ref DCM): Other",
+                        "Dx * Age (Ref DCM & <1 Year): CHD & 1-4 Years",
+                        "Dx * Age (Ref DCM & <1 Year): CHD & 5-11 Years",
+                        "Dx * Age (Ref DCM & <1 Year): CHD & >11 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Re-HT & 1-4 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Re-HT & 5-11 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Re-HT & >11 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Other & 1-4 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Other & 5-11 Years",
+                        "Dx * Age (Ref DCM & <1 Year): Other & >11 Years"))
+
+sensitivity_logit = plot_model(sens_exception_logit, 
+           show.values = TRUE,
+           value.offset = 0.3,
+           value.size = 6,
+           order.terms = c(1:22),
+           axis.lim = c(0.01, 1000),
+           grid.breaks = c(0.01, 0.1, 1, 5, 10, 100, 1000),
+           axis.labels = labels_reversed,
+           title = "") +
+  theme_classic() +
+  theme(text = element_text(size = 18),
+        axis.text.x = element_text(size = 16),
+        axis.title.x = element_text(size = 18),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 18),
+        legend.text = element_text(size = 18),
+        legend.title = element_text(size = 18)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+
+
+library(performance)
+compare_performance(exception_logit, sens_exception_logit)
+
+summary(sens_exception_logit)
+
+
+exp(fixef(sens_exception_logit))
+exp(confint(sens_exception_logit, method = "Wald", parm = "beta_"))
+
+
+
+# ===== 2. CHECK NORMALITY OF RANDOM EFFECTS =====
+ranef_values <- ranef(exception_logit)$LISTING_CTR_CODE[,1]
+
+# QQ plot
+qqnorm(ranef_values, main = "Q-Q Plot of Center Random Effects")
+qqline(ranef_values, col = "red")
+
+# Shapiro-Wilk test
+shapiro.test(ranef_values)  # p > 0.05 = normal
+
+# Histogram
+hist(ranef_values, breaks = 20,
+     main = "Distribution of Center Random Effects",
+     xlab = "Random Effect")
+
+
+# ===== 4. CHECK MULTICOLLINEARITY =====
+# Fit without random effects first
+logit_no_re <- glm(REC_EXCEPTION_EVER ~ sex + race + age_group + 
+                    blood_type_dummy + weight_group + diagnosis_dummy,
+                   data = fortable1, 
+                   family = binomial)
+
+vif_values <- vif(logit_no_re)
+print("VIF values:")
+print(vif_values)
+# VIF < 5 = good
+
+# ===== 5. CHECK CLUSTER SIZE ADEQUACY =====
+cluster_summary <- fortable1 %>% ungroup() %>%
+  group_by(LISTING_CTR_CODE) %>%
+  summarise(
+    n_patients = n(),
+    n_exceptions = sum(REC_EXCEPTION_EVER == "Received Exception"),
+    exception_rate = mean(REC_EXCEPTION_EVER == "Received Exception")
+  ) %>%
+  arrange(n_patients)
+
+print(summary(cluster_summary))
+
+# Count small clusters
+small_clusters <- cluster_summary %>%
+  filter(n_patients < 10 | n_exceptions < 5)
+print(paste0("Small clusters: ", nrow(small_clusters), " out of ", 
+             nrow(cluster_summary)))
+
+# ===== 6. SENSITIVITY ANALYSIS - EXCLUDE SMALL CENTERS =====
+adequate_centers <- cluster_summary %>%
+  filter(n_patients >= 10, n_exceptions >= 5) %>%
+  pull(LISTING_CTR_CODE)
+
+print(paste0("Adequate centers: ", length(adequate_centers), 
+             " out of ", nrow(cluster_summary)))
+
+# Refit model
+fortable1_adequate <- fortable1 %>%
+  filter(LISTING_CTR_CODE %in% adequate_centers)
+
+exception_logit_sensitivity <- glmer(REC_EXCEPTION_EVER ~ sex + race + age_group + 
+                                      blood_type_dummy + weight_group + diagnosis_dummy +
+                                      (1 | LISTING_CTR_CODE),
+                                    data = fortable1_adequate, 
+                                    family = binomial(link = "logit"))
+
+# Compare odds ratios
+comparison <- data.frame(
+  Variable = names(fixef(exception_logit)),
+  All_Centers_OR = exp(fixef(exception_logit)),
+  Adequate_Centers_OR = exp(fixef(exception_logit_sensitivity)),
+  Percent_Change = (exp(fixef(exception_logit_sensitivity)) - 
+                    exp(fixef(exception_logit))) / 
+                   exp(fixef(exception_logit)) * 100
+)
+
+print("Odds ratio comparison:")
+print(comparison)
+
+# Compare variance of random effects
+cat("\n=== Random Effect Variance ===\n")
+cat("All centers:", VarCorr(exception_logit)$LISTING_CTR_CODE[1], "\n")
+cat("Adequate centers:", VarCorr(exception_logit_sensitivity)$LISTING_CTR_CODE[1], "\n")
+
+# ===== 7. CHECK FOR OVERDISPERSION =====
+# Already handled by DHARMa plot
+testDispersion(sim_resid)  # p > 0.05 = no overdispersion
+
+# ===== 8. CHECK FOR OUTLIERS =====
+testOutliers(sim_resid)  # p > 0.05 = no outliers
+
+
+sim_resid2 <- simulateResiduals(sens_exception_logit, n = 1000)
+plot(sim_resid2)
+
+testDispersion(sim_resid2)  # Should be n.s.
+testOutliers(sim_resid2)    # Should be n.s.
+
+``` 
+
+
+``` {r figure 4}
+library(emmeans)
+library(ggplot2)
+library(dplyr)
+
+#The following code is for the creation of Figure 3
+
+# Get predicted probabilities with confidence intervals
+emm <- emmeans(sens_exception_logit, ~ age_group | diagnosis_dummy, 
+               type = "response")
+emm_df <- as.data.frame(emm)
+
+# Create publication-quality plot
+interaction_plot = ggplot(emm_df, aes(x = age_group, y = prob, 
+                   color = diagnosis_dummy, group = diagnosis_dummy)) +
+  geom_point(size = 4) +
+  geom_line(linewidth = 1.2) +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), 
+                width = 0.2, linewidth = 1) +
+  scale_color_manual(name = "Diagnosis",
+                     values = c("Dilated Cardiomyopathy" = "#374e55",
+                               "Congenital Heart Disease" = "#df8f44",
+                               "Re-Heart Transplant" = "#00a1d5",
+                               "Other" = "gray60")) +
+  labs(x = "Age Group", 
+       y = "Predicted Probability of Exception Receipt") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  theme_classic() +
+  theme(text = element_text(size = 16),
+        axis.text = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.position = "bottom")
+
+interaction_plot
+
+
+
+emm_pairs <- pairs(emm, by = "age_group", reverse = TRUE) # reverse to get CHD/Cardiomyopathy
+summary(emm_pairs, infer = TRUE)
+
+pairs_result <- pairs(emm, by = "age_group")  # reverse to get CHD/Cardiomyopathy
+summary(pairs_result, infer = TRUE)  # infer=TRUE gives CIs
+
+
+
+
+```

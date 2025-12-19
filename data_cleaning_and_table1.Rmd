@@ -1,0 +1,751 @@
+---
+title: "Data Cleaning and Table 1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(knitr)
+opts_chunk$set(comment = NA, prompt = FALSE, cache = FALSE, echo = TRUE,
+                      results = "asis")
+
+library(tidyverse)
+library(haven)
+library(rmdformats)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gtsummary)
+library(cowplot)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(cmprsk)
+library(tidycmprsk)
+library(pROC)
+library(risksetROC)
+library(rsample)
+library(sjPlot)
+library(coxme)
+
+```
+
+```{r color_schemes}
+custom_colors <- c(
+  `dark red` = "#660000",
+  `bright red` = "#b81d2e",
+  `orange` = "#ae6320",
+  `yellow`= "#b8a370",
+  `green` = "#3ba9a9",
+  `white` = "#FFFFFF",
+  `grey` = "#C3C1C1",
+  `light green` = "#8dd9d7",
+  `light yellow` = "#ddd3bb",
+  `light orange` = "#e49f62",
+  `space sparkle`= "#496061",
+  `violet` = "#7A3DE3",
+  `sandy brown` = "#FA9E4D")
+custom_col <- function(...) {
+  cols <- c(...)
+  if (is.null(cols))
+    return (drsimonj_colors)
+  custom_colors[cols]
+}
+custom_palettes <- list(
+  `main`  = custom_col("green", "yellow", "dark red"),
+  `cool`  = custom_col("green", "yellow","orange"),
+  `hot`   = custom_col("yellow", "dark red", "sandy brown"),
+  `simple` = custom_col("yellow", "dark red"),
+  `reallysimple` = custom_col("white", "#00a1d5"),
+  `mixed` = custom_col("green", "yellow", "orange", "bright red", "dark red"),
+  `distinct` = custom_col("dark red", "bright red", "light yellow", "green","grey"),
+  `distinct1` = custom_col("dark red", "bright red",  "green","light yellow","grey"), 
+  `bar` = custom_col("green", "grey", "yellow", "orange", "bright red", "dark red"),
+  `treatment` = custom_col("dark red","green", "space sparkle", "orange", "violet","yellow","sandy brown","bright red"),
+  `exception` = custom_col("dark red", "yellow"),
+  `agegroup` = custom_col("bright red", "orange", "yellow", "grey")
+)
+custom_pal <- function(palette = "main", reverse = FALSE, ...) {
+  pal <- custom_palettes[[palette]]
+  if (reverse) pal <- rev(pal)
+  colorRampPalette(pal, ...)
+}
+scale_color_custom <- function(palette = "mixed", discrete = TRUE, reverse = FALSE, ...) {
+  pal <- custom_pal(palette = palette, reverse = reverse)
+  if (discrete) {
+    discrete_scale("colour", paste0("custom_", palette), palette = pal, ...)
+  } else {
+    scale_color_gradientn(colours = pal(256), ...)
+  }
+}
+scale_fill_custom <- function(palette = "mixed", discrete = TRUE, reverse = FALSE, ...) {
+  pal <- custom_pal(palette = palette, reverse = reverse)
+  if (discrete) {
+    discrete_scale("fill", paste0("custom_", palette), palette = pal, ...)
+  } else {
+    scale_fill_gradientn(colours = pal(256), ...)
+  }
+}
+
+```
+
+
+``` {r load datasets}
+
+thoracic_followup_data_2025q2 = read_sas("~/Desktop/R Project Data/HRStatJust2509DanielAhn/thoracic_followup_data_2025q2", NULL)
+
+thoracic_data_2025q2 = read_sas("~/Desktop/R Project Data/HRStatJust2509DanielAhn/thoracic_data_2025q2", NULL)
+
+thoracic_stat1a = read_sas("~/Desktop/R Project Data/HRStatJust2509DanielAhn/thoracic_stat1a", NULL)
+
+thoracic_stat1b = read_sas("~/Desktop/R Project Data/HRStatJust2509DanielAhn/thoracic_stat1b", NULL)
+
+
+```
+
+
+
+
+# Filter and pivot data by relevant dates
+
+
+
+``` {r data cleaning}
+
+
+tx_list <- thoracic_followup_data_2025q2 %>% select(TRR_ID_CODE, PT_CODE, PX_STAT, PX_STAT_DATE) %>% 
+  group_by(TRR_ID_CODE) %>% filter(PX_STAT == "A" | PX_STAT == "D" | PX_STAT == "R") %>% arrange(PX_STAT_DATE) %>%
+  filter(row_number() == n())
+
+
+cand_list = thoracic_data_2025q2 %>% select(PT_CODE, WL_ID_CODE, TRR_ID_CODE, INIT_DATE, INIT_STAT, COMPOSITE_DEATH_DATE, INIT_AGE, WL_ORG, END_DATE, REM_CD, LISTING_CTR_CODE, END_STAT, GENDER, ABO, THORACIC_DGN, TCR_DGN, ETHNICITY, ETHCAT, BMI_TCR, BMI_CALC, ECMO_TCR, IABP_TCR, INOTROPES_TCR, VAD_DEVICE_TY_TCR, VENTILATOR_TCR, INIT_WGT_KG_CALC, REGION) %>% 
+  filter(INIT_AGE < 18) %>% filter(WL_ORG == "HR") %>% 
+  filter(INIT_DATE >= mdy("03-22-2016") & INIT_DATE <= mdy("03-31-2025")) %>%
+  mutate(
+    period = case_when(
+      INIT_DATE >= mdy("07-01-2017") & INIT_DATE <= mdy("03-31-2021") ~ "pre-nhrb",
+      INIT_DATE >= mdy("07-01-2021") & INIT_DATE <= mdy("03-31-2025") ~ "post-nhrb",
+      TRUE ~ "other"),
+    initial_status = case_when(
+      grepl("2010", INIT_STAT) ~ "1A",
+      grepl("2020", INIT_STAT) ~ "1B",
+      grepl("2030", INIT_STAT) ~ "2",
+      grepl("2999", INIT_STAT) ~ "Inactive"),
+    TX_DATE = ifelse(REM_CD == 4, END_DATE, NA),
+    TX_DATE = as.Date(TX_DATE, origin = "1970-01-01")) %>% filter(initial_status != "Inactive")  
+
+
+#split data into single and multiple registrations
+single_registrations = cand_list %>% 
+  group_by(PT_CODE) %>%
+  filter(n() == 1)
+
+multiple_registrations = cand_list %>%
+  group_by(PT_CODE) %>%
+  filter(n() > 1)
+
+
+#distinguish type of multiple registration (concurrents must be collapsed into single listing)
+multiple_registrations = multiple_registrations %>% arrange(INIT_DATE) %>%
+  mutate(list_type = case_when(
+    INIT_DATE < dplyr::lag(END_DATE) ~ "concurrent",
+    END_DATE > dplyr::lead(INIT_DATE) ~ "concurrent",
+    TRUE ~ "sequential")) 
+
+multiple_registrations = multiple_registrations[order(multiple_registrations$PT_CODE, multiple_registrations$END_DATE), ]
+
+ 
+multiple_registrations$transplant_num <- 1 
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      !is.na(multiple_registrations$TX_DATE[i-1]) && 
+      !is.na(multiple_registrations$TX_DATE[i]) &&
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      multiple_registrations$TX_DATE[i-1] != multiple_registrations$TX_DATE[i]) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1] + 1
+  }
+}
+
+for (i in 2:nrow(multiple_registrations)) {
+  if (!is.na(multiple_registrations$PT_CODE[i-1]) && 
+      !is.na(multiple_registrations$PT_CODE[i]) && 
+      multiple_registrations$PT_CODE[i-1] == multiple_registrations$PT_CODE[i] &&
+      !is.na(multiple_registrations$transplant_num[i-1]) && 
+      multiple_registrations$transplant_num[i-1] != multiple_registrations$transplant_num[i] &&
+      multiple_registrations$transplant_num[i-1] != 1) {
+    
+    multiple_registrations$transplant_num[i] = multiple_registrations$transplant_num[i-1]
+  }
+}
+
+multiple_registrations$transplant_num[multiple_registrations$list_type == 'sequential'] <- 0 
+
+for(i in 1:(nrow(multiple_registrations)-1)) { 
+  if(multiple_registrations$PT_CODE[i] == multiple_registrations$PT_CODE[i+1] &
+     multiple_registrations$list_type[i] == 'concurrent' & multiple_registrations$list_type[i+1] == 'concurrent' &
+     !is.na(multiple_registrations$TX_DATE[i]) & !is.na(multiple_registrations$TX_DATE[i+1]) &
+     multiple_registrations$TX_DATE[i] < multiple_registrations$TX_DATE[i+1] ) {
+    
+    multiple_registrations$TX_DATE[i] <- multiple_registrations$TX_DATE[i+1] ##if PERS_ID is the same as the NEXT row, both have concurrent listings, transplant dates for both are not NA, and transplant date is earlier than the next row's transplant date - update to next row's transplant date
+  }}
+
+
+sequential_lists <- multiple_registrations %>%
+  filter(list_type == "sequential") %>%
+  mutate(min_list_date = INIT_DATE)  
+
+multiple_registrations <- multiple_registrations %>% 
+  group_by(PT_CODE, transplant_num) %>%
+  mutate(min_list_date = min(INIT_DATE, na.rm=T))
+
+multiple_registrations <- multiple_registrations %>% mutate
+max_retransplants <- max(multiple_registrations$transplant_num) 
+
+collapsed_concurrent_registrations <- NULL 
+for(i in 1:max_retransplants) {
+  collapsed_concurrent_registrations <- rbind(collapsed_concurrent_registrations, 
+        
+  multiple_registrations %>%
+    filter(list_type == "concurrent" & transplant_num == i) %>% 
+    mutate(last_wait_date = max(END_DATE, na.rm = TRUE)) %>% 
+    fill(TX_DATE, .direction = "up") %>%
+    fill(REM_CD, .direction = "up") %>%
+    select(-c(END_DATE, INIT_DATE)) %>%
+    filter(row_number() == 1) %>%  
+    mutate(last_wait_date = case_when(
+      TX_DATE < last_wait_date ~ TX_DATE,
+      TRUE ~ last_wait_date)))}
+
+##recombine separated data frames
+
+#recombined data
+cand_list <- bind_rows(single_registrations %>% ungroup(), 
+                       sequential_lists %>% ungroup(), 
+                       collapsed_concurrent_registrations %>% ungroup()) 
+
+
+
+#fix listing date 
+cand_list = cand_list %>% 
+  mutate(
+    min_list_date = if_else(is.na(min_list_date), as.Date(INIT_DATE), as.Date(min_list_date)))
+
+
+cand_list = cand_list %>% 
+  mutate(INIT_DATE = ifelse(is.na(INIT_DATE), min_list_date, INIT_DATE),
+         END_DATE = ifelse(is.na(END_DATE), last_wait_date, END_DATE),
+         INIT_DATE = as.Date(INIT_DATE, origin = "1970-01-01"),
+         END_DATE = as.Date(END_DATE, origin = "1970-01-01")) %>%
+  select(-list_type, -transplant_num, -min_list_date, -last_wait_date)
+
+
+status1ajustifications = thoracic_stat1a %>% 
+  mutate(RequestedCandStatCd = 2010,
+         EXCEPTION = REQ6_CRITERIA_NOT_MET,
+         STATUS_JUST = case_when(
+           REQ1_CONTINUOUS_VENTILATION == 1 ~ "Mechanical Ventilation",
+           REQ3_DUCTAL_DEPENDENCY == 1 ~ "Ductal-Dependent Circulation",
+           REQ4_CHD_DIAGNOSIS == 1 ~ "Congenital Heart Disease",
+           REQ5_CIRCULATORY_DEVICE == 1 | REQ2_BALLOONPUMP == 1 ~ "MCS/IABP",
+           REQ6_CRITERIA_NOT_MET == 1 ~ "1A Exception"
+         )) %>% select(WL_ID_CODE, EXCEPTION, UPGRADE_EXTDATE, RequestedCandStatCd, STATUS_JUST) 
+
+status1bjustifications = thoracic_stat1b %>% 
+  mutate(RequestedCandStatCd = 2020,
+         EXCEPTION = REQ3_CRITERIA_NOT_MET,
+         STATUS_JUST = case_when(
+           REQ2_CARDIOMYOPATHY == 1 | REQ1_INOTROPIC_AGENT == 1 ~ "Standard 1B Listing",
+           REQ3_CRITERIA_NOT_MET == 1 ~ "1B Exception"
+         )) %>% select(WL_ID_CODE, EXCEPTION, UPGRADE_EXTDATE, RequestedCandStatCd, STATUS_JUST) 
+
+
+status_exception_justifications = rbind(status1ajustifications, status1bjustifications)
+
+
+cand_hx_list = cand_list %>%
+  left_join(thoracic_wlhistory_data_2025q2 %>% select(WL_ID_CODE, CHG_DATE, CHG_TY, UNOS_CAND_STAT_CD), by = "WL_ID_CODE") %>%
+  group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, CHG_DATE) %>%
+  mutate(
+    STATUS = case_when(
+      grepl("2010", UNOS_CAND_STAT_CD) ~ "1A",
+      grepl("2020", UNOS_CAND_STAT_CD) ~ "1B",
+      grepl("2030", UNOS_CAND_STAT_CD) ~ "2",
+      grepl("2999", UNOS_CAND_STAT_CD) ~ "Inactive")) %>%
+  filter(row_number() > 1) %>% distinct(WL_ID_CODE, CHG_DATE, .keep_all = TRUE) 
+   
+
+
+
+
+cand_hx_list_episodes = cand_hx_list %>% left_join(status_exception_justifications, by = "WL_ID_CODE") %>%
+  mutate(
+    matching = ifelse(UNOS_CAND_STAT_CD == RequestedCandStatCd & CHG_DATE == UPGRADE_EXTDATE, 1, 0),
+    matching = ifelse(is.na(matching), 0, matching))
+
+cand_hx_list_episodes1 = cand_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(matching == 1)
+
+cand_hx_list_episodes2 = cand_hx_list_episodes %>% group_by(WL_ID_CODE, CHG_DATE) %>% arrange(CHG_DATE) %>%
+  filter(matching == 0) %>% slice(1)
+
+
+cand_hx_list_episodes = rbind(cand_hx_list_episodes1, cand_hx_list_episodes2) %>% ungroup() %>%
+  mutate(
+    UPGRADE_EXTDATE = ifelse(matching == 0, NA, UPGRADE_EXTDATE),
+    UPGRADE_EXTDATE = as.Date(UPGRADE_EXTDATE, origin = "1970-01-01"),
+    STATUS_JUST = ifelse(matching == 0, NA, STATUS_JUST),
+    RequestedCandStatCd = ifelse(matching == 0, NA, RequestedCandStatCd),
+    EXCEPTION = ifelse(matching == 0, NA, EXCEPTION)) %>% distinct()
+
+duplicated_rows_1 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() == 1) %>% arrange(CHG_DATE) %>% ungroup()
+
+duplicated_rows_2 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() == 2) %>% arrange(CHG_DATE) %>% filter(matching == 1) %>% ungroup()
+
+duplicated_rows_3 <- cand_hx_list_episodes %>%
+  group_by(WL_ID_CODE, CHG_DATE) %>%
+  filter(n() > 2) %>% arrange(CHG_DATE) %>% filter(CHG_TY != "D") %>% 
+  filter(matching == 1) %>% arrange(UNOS_CAND_STAT_CD) %>% 
+  mutate(
+    has_exc = case_when(
+      any(EXCEPTION == 1) ~ 1,
+      TRUE ~ 0))
+
+duplicated_rows_3.1 = duplicated_rows_3 %>% filter(has_exc == 1) %>% filter(EXCEPTION == 1) %>% 
+  select(-has_exc) %>% ungroup()
+
+duplicated_rows_3.2 = duplicated_rows_3 %>% filter(has_exc == 0) %>% arrange(UNOS_CAND_STAT_CD) %>% 
+  slice(1) %>% select(-has_exc) %>% ungroup()
+  
+cand_hx_list_episodes = rbind(duplicated_rows_1, duplicated_rows_2, duplicated_rows_3.1, duplicated_rows_3.2) %>% 
+  group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, CHG_DATE) %>% filter(CHG_TY != "D") %>%
+  mutate(
+    index_of_exception = which(EXCEPTION == 1) [1],
+    CHG_END_DATE = dplyr::lead(CHG_DATE),
+    CHG_END_DATE = ifelse(is.na(CHG_END_DATE), END_DATE, CHG_END_DATE),
+    CHG_END_DATE = as.Date(CHG_END_DATE, origin = "1970-01-01"),
+    start = as.numeric(difftime(CHG_DATE, INIT_DATE, units = "days")),
+    end = as.numeric(difftime(CHG_END_DATE, INIT_DATE, units = "days")),
+    EXCEPTION = ifelse(is.na(EXCEPTION), 0, EXCEPTION)) %>%
+  filter(!(row_number() == n() & last(CHG_END_DATE) %in% head(CHG_END_DATE, -1))) %>%
+  filter(CHG_END_DATE > CHG_DATE) %>%
+  mutate(
+    is_last_row = row_number() == n(),
+    death = case_when(
+      is_last_row == TRUE & (REM_CD == 8 | REM_CD == 13) ~ 1,
+      TRUE ~ 0),
+    transplant = case_when(
+      is_last_row == TRUE & REM_CD == 4 ~ 1,
+      TRUE ~ 0),
+    death = ifelse(is.na(death), 0, death),
+    transplant = ifelse(is.na(transplant), 0, transplant)) 
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes %>% 
+  group_by(grp = cumsum(EXCEPTION == 1)) %>% 
+  mutate(numbering = row_number()) %>%
+  mutate(
+    time_since_exception = as.numeric(difftime(CHG_DATE, first(CHG_DATE), units = "days")),
+    new_fill_for_exception = case_when(
+      grp > 0 & first(STATUS) == "1A" & UNOS_CAND_STAT_CD == first(UNOS_CAND_STAT_CD) & time_since_exception <= 14 & WL_ID_CODE == first(WL_ID_CODE) ~ 1,
+      grp > 0 & first(STATUS) == "1B" & UNOS_CAND_STAT_CD == first(UNOS_CAND_STAT_CD) & WL_ID_CODE == first(WL_ID_CODE) ~ 1,
+      TRUE ~ 0),
+    EXCEPTION = ifelse(new_fill_for_exception == 1, 1, EXCEPTION))
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(EXCEPTION = ifelse(STATUS == "Inactive", NA, EXCEPTION)) %>%
+  mutate(STATUS = factor(case_when(
+    !(UNOS_CAND_STAT_CD %in% c(1999, 2999)) ~ STATUS))) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(STATUS, .direction = "down") %>%
+  fill(EXCEPTION, .direction = "down") %>%
+  fill(STATUS_JUST, .direction = "down") %>%
+  ungroup()
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(REC_EXCEPTION_EVER = case_when(EXCEPTION == 1 ~ 1)) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(REC_EXCEPTION_EVER, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(REC_EXCEPTION_EVER = tidyr::replace_na(REC_EXCEPTION_EVER, 0))
+
+cand_hx_list_episodes_grouping <- cand_hx_list_episodes_grouping %>%
+  mutate(
+    REC_EXCEPTION_INIT = case_when(
+      EXCEPTION == 1 & start == 0 ~ 1)) %>%
+  group_by(WL_ID_CODE) %>%
+  fill(REC_EXCEPTION_INIT, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(REC_EXCEPTION_INIT = tidyr::replace_na(REC_EXCEPTION_INIT, 0))
+
+cand_hx_list_episodes_grouping <- cand_hx_list_episodes_grouping %>%
+  mutate(
+    REC_EXCEPTION_INIT_EVER = factor(
+      case_when(
+        REC_EXCEPTION_INIT == 1 ~ "Exception at Listing",
+        REC_EXCEPTION_EVER == 1 & REC_EXCEPTION_INIT == 0 ~ "Exception after Listing",
+        TRUE ~ "No Exception"),
+      levels = c("Exception at Listing",
+                 "Exception after Listing",
+                 "No Exception")))
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(
+    STATUS = relevel(STATUS, ref = "2"),
+    EXCEPTION_STATUS = factor(
+      case_when(
+        STATUS == "1A" &
+          EXCEPTION == 0 ~ "Status 1A No Exception",
+        STATUS == "1A" &
+          EXCEPTION == 1 ~ "Status 1A Exception",
+        STATUS == "1B" &
+          EXCEPTION == 0 ~ "Status 1B No Exception",
+        STATUS == "1B" &
+          EXCEPTION == 1 ~ "Status 1B Exception",
+        TRUE ~ "Status 2"),
+      levels = c(
+        "Status 1A No Exception",
+        "Status 1A Exception",
+        "Status 1B No Exception",
+        "Status 1B Exception",
+        "Status 2")),
+    EXCEPTION_STATUS = relevel(EXCEPTION_STATUS, ref = "Status 2"))
+
+
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  ungroup() %>% group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, CHG_DATE) %>%
+  mutate(
+    STATUS_JUST = case_when(
+      STATUS == "2" ~ "2",
+      TRUE ~ STATUS_JUST)) %>%
+  fill(STATUS_JUST, .direction = "down") %>%
+  mutate(
+    STATUS_JUST = case_when(
+      STATUS_JUST == "1A Exception" ~ "Status 1A: Exception",
+      STATUS_JUST == "Congenital Heart Disease" ~ "Status 1A: Congenital Heart Disease",
+      STATUS_JUST == "Ductal-Dependent Circulation" ~ "Status 1A: Ductal-Dependent Circulation",
+      STATUS_JUST == "MCS/IABP" ~ "Status 1A: MCS/IABP",
+      STATUS_JUST == "Mechanical Ventilation" ~ "Status 1A: Mechanical Ventilation",
+      STATUS_JUST == "1B Exception" ~ "Status 1B: Exception",
+      STATUS_JUST == "Standard 1B Listing" ~ "Status 1B: Standard 1B Listing",
+      STATUS_JUST == "2" ~ "Status 2"),
+    STATUS_JUST = factor(STATUS_JUST, levels = c("Status 2", "Status 1B: Exception", "Status 1B: Standard 1B Listing", "Status 1A: Exception", "Status 1A: Congenital Heart Disease", "Status 1A: Ductal-Dependent Circulation", "Status 1A: MCS/IABP", "Status 1A: Mechanical Ventilation")))
+
+
+last_observations = cand_hx_list_episodes %>% group_by(WL_ID_CODE) %>% arrange(CHG_DATE) %>% filter(row_number() == n())
+
+```
+
+
+``` {r fortable1}
+
+fortable1 = cand_hx_list_episodes_grouping %>% group_by(WL_ID_CODE) %>% slice(1) %>%
+  mutate(
+    sex = ifelse(GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      ETHCAT == 1 ~ "White",
+      ETHCAT == 2 ~ "Black",
+      ETHCAT == 4 ~ "Hispanic/Latino",
+      ETHCAT == 5 ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    REC_EXCEPTION_INIT_EVER = factor(REC_EXCEPTION_INIT_EVER, levels = c("No Exception", "Exception at Listing", "Exception after Listing")),
+    age_group = case_when(
+      INIT_AGE < 1 ~ "<1 Year",
+      INIT_AGE >= 1 & INIT_AGE < 5 ~ "1-4 Years",
+      INIT_AGE >= 5 & INIT_AGE < 12 ~ "5-11 Years",
+      INIT_AGE >= 12 ~ ">11 Years"),
+    age_group = factor(age_group, levels = c("<1 Year", "1-4 Years", "5-11 Years", ">11 Years")),
+    blood_type = factor(
+      case_when(
+        ABO %in% c("A", "A1", "A2") ~ "A",
+        ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ ABO)),
+    blood_type_dummy = case_when(
+      ABO == "O" ~ "Blood Type O",
+      TRUE ~ "Non-Blood Type O"),
+    blood_type_dummy = factor(blood_type_dummy, levels = c("Non-Blood Type O", "Blood Type O")),
+    weight_group = case_when(
+      INIT_WGT_KG_CALC < 25 ~ "Less than 25 kg",
+      TRUE ~ "25 kg or Greater"),
+    weight_group = factor(weight_group, levels = c("25 kg or Greater", "Less than 25 kg")),
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    diagnosis_dummy = case_when(
+      diagnosis == "Dilated Cardiomyopathy, Non-Ischemic" ~ "Dilated Cardiomyopathy",
+      diagnosis == "Congenital Heart Disease" ~ "Congenital Heart Disease",
+      diagnosis == "Re-Heart Transplant" ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis_dummy = factor(diagnosis_dummy, levels = c("Dilated Cardiomyopathy", "Congenital Heart Disease", "Re-Heart Transplant", "Other")),
+    inotropes = ifelse(INOTROPES_TCR == 1, "IV Inotropes", "None"),
+    ECMO = ifelse(ECMO_TCR == 1, "ECMO", "None"),
+    IABP = ifelse(IABP_TCR == 1, "IABP", "None"),
+    ventilation = ifelse(VENTILATOR_TCR == 1, "Mechanical Ventilation", "None"),
+    VAD = ifelse(VAD_DEVICE_TY_TCR == 2 | VAD_DEVICE_TY_TCR == 3 | VAD_DEVICE_TY_TCR == 5, "VAD", "None"))
+
+var_label_list <- list(age_group = "Age at Listing",
+                       sex = "Sex",
+                       race = "Race",
+                       INIT_WGT_KG_CALC = "Weight (Kilograms)",
+                       initial_status = "Status at Initial Listing",
+                       blood_type = "Blood Type",
+                       diagnosis = "Primary Diagnosis",
+                       REC_EXCEPTION_INIT_EVER = "Exception Status",
+                       VAD = "VAD at Initial Listing",
+                       inotropes = "IV Inotropes at Initial Listing",
+                       ECMO = "ECMO at Initial Listing",
+                       IABP = "IABP at Initial Listing",
+                       ventilation = "Mechanical Ventilation at Initial Listing")
+labelled::var_label(fortable1) <- var_label_list
+
+
+fortable1 %>% ungroup() %>%
+  dplyr::select(
+    age_group, sex, race, INIT_WGT_KG_CALC, blood_type, diagnosis, initial_status, REC_EXCEPTION_INIT_EVER) %>%
+  tbl_summary(by = REC_EXCEPTION_INIT_EVER, digits = list(all_categorical() ~ c(0, 1))) %>%
+  add_p(test.args = all_tests("chisq.test") ~ list(workspace=2e7)) %>%
+  add_overall() %>% 
+  #remove_row_type(variables = c(pcwp, cardiac_index), type = "missing", level_value = ("(Missing)")) %>%
+  remove_row_type(variables = c(INIT_WGT_KG_CALC), type = "missing", level_value = ("(Unknown)")) %>%
+  as_gt()
+
+
+
+
+number <- fortable1 %>% group_by(LISTING_CTR_CODE) %>%
+  summarise(n = n())
+
+fortable1 <- fortable1 %>% left_join(number) %>% ungroup() %>% group_by(LISTING_CTR_CODE) %>% arrange(n, LISTING_CTR_CODE)
+  
+groups = fortable1$LISTING_CTR_CODE %>% unique
+i = 0
+fortable1$center = NA
+for (g in groups) {
+  i = i + 1
+  fortable1[fortable1$LISTING_CTR_CODE == g, ]$center = i
+}
+
+rates <- fortable1 %>% ungroup() %>% group_by(LISTING_CTR_CODE) %>%
+  summarize(
+    prop_applied_exceptions = sum(REC_EXCEPTION_EVER == 1) / n(),
+    number_exceptions = sum(REC_EXCEPTION_EVER == 1),
+    prop_exceptions_whole = sum(REC_EXCEPTION_EVER == 1) / 6026) %>%
+  arrange(-number_exceptions) %>%
+  mutate(Cum = cumsum(number_exceptions)) %>%
+  mutate(CumProp = cumsum(prop_exceptions_whole))
+
+
+median(rates$prop_applied_exceptions)
+
+
+fortable1$REC_EXCEPTION_EVER <- factor(fortable1$REC_EXCEPTION_EVER,
+                                       levels = c(0, 1),
+                                       labels = c("Standard Criteria Listing", "Received Exception"))
+
+```
+
+
+``` {r patient volumes by center}
+
+library(dplyr)
+library(ggplot2)
+
+# Calculate patient volumes per center
+center_volumes <- fortable1 %>%
+  group_by(LISTING_CTR_CODE) %>%
+  summarise(n_patients = n()) %>%
+  arrange(desc(n_patients))
+
+# Summary statistics
+summary_stats <- center_volumes %>%
+  summarise(
+    n_centers = n(),
+    mean = mean(n_patients),
+    median = median(n_patients),
+    Q1 = quantile(n_patients, 0.25),
+    Q3 = quantile(n_patients, 0.75),
+    IQR = IQR(n_patients),
+    min = min(n_patients),
+    max = max(n_patients)
+  )
+
+print(summary_stats)
+
+# Calculate concentration metrics
+concentration <- center_volumes %>%
+  mutate(
+    cumsum_patients = cumsum(n_patients),
+    total_patients = sum(n_patients),
+    cumulative_pct = cumsum_patients / total_patients * 100
+  )
+
+# Patients in top 25% of centers
+top_25pct <- concentration %>%
+  slice(1:ceiling(0.25 * nrow(.))) %>%
+  summarise(pct_patients = last(cumulative_pct))
+
+print(paste0("Top 25% of centers (n=", ceiling(0.25 * nrow(center_volumes)), 
+             ") contain ", round(top_25pct$pct_patients, 1), "% of patients"))
+
+# Histogram
+ggplot(center_volumes, aes(x = n_patients)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "black") +
+  labs(x = "Number of Patients per Center",
+       y = "Number of Centers",
+       title = "Distribution of Patient Volumes Across Transplant Centers") +
+  theme_classic()
+
+# Create table for manuscript
+volume_categories <- center_volumes %>%
+  mutate(category = cut(n_patients, 
+                        breaks = c(0, 25, 50, 100, 200, Inf),
+                        labels = c("1-25", "26-50", "51-100", "101-200", ">200"),
+                        right = TRUE)) %>%
+  group_by(category) %>%
+  summarise(
+    n_centers = n(),
+    pct_centers = n() / nrow(center_volumes) * 100,
+    total_patients = sum(n_patients),
+    pct_patients = total_patients / sum(center_volumes$n_patients) * 100
+  )
+
+print(volume_categories)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+``` {r auc}
+#THE FOLLOWING CODE WAS REMOVED FROM MANUSCRIPT DURING REVISION PROCESS
+
+# require(rsample)
+# require(risksetROC)
+# 
+# data_for_cindex = cand_hx_list_episodes_grouping %>% dplyr::select(WL_ID_CODE, INIT_AGE, TCR_DGN, start, end, death, EXCEPTION, STATUS) %>%
+#   group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, start) %>%
+#   mutate(
+#     status_without_exception = case_when(
+#       STATUS == "1B" & EXCEPTION == 1 ~ "2",
+#       STATUS == "1A" & EXCEPTION == 1 ~ "1B",
+#       TRUE ~ STATUS),
+#     new_status_normal = case_when(
+#       STATUS == "1A" ~ 1,
+#       STATUS == "1B" ~ 2,
+#       STATUS == "2" ~ 3),
+#     new_status_hypothetical = case_when(
+#       status_without_exception == "1A" ~ 1,
+#       status_without_exception == "1B" ~ 2,
+#       status_without_exception == "2" ~ 3),
+#     death_6weeks = ifelse(death == 1 & end <= 42, 1, 0),
+#     death_6weeks = ifelse(any(death_6weeks == 1), 1, 0)
+#     )
+# 
+# auc_graph_data = data_for_cindex %>% slice(1) %>%
+#   mutate(
+#     auc_status_with_exception = case_when(
+#       STATUS == "1A" ~ 1,
+#       STATUS == "1B" ~ 2,
+#       STATUS == "2" ~ 3),
+#     auc_status_without_exception = case_when(
+#       status_without_exception == "1A" ~ 1,
+#       status_without_exception == "1B" ~ 2,
+#       status_without_exception == "2" ~ 3),
+#     auc_status_with_exception = factor(auc_status_with_exception, ordered = TRUE, levels = c(1, 2, 3), labels = c("Status 1A", "Status 1B", "Status 2")),
+#     auc_status_without_exception = factor(auc_status_without_exception, ordered = TRUE, levels = c(1, 2, 3), labels = c("Status 1A", "Status 1B", "Status 2")),
+#     nope = factor(STATUS, ordered = TRUE, levels = c("1A", "1B", "2")))
+# 
+# roc_obj <- pROC::roc(auc_graph_data$death_6weeks, auc_graph_data$nope, direction = ">")
+# pROC::ggroc(roc_obj)
+# 
+# par(xaxs='i')
+# par(pty = "s")
+# par(cex.axis = 1.2, cex.lab = 1.2) 
+# # First ROC curve (plots the graph and the first AUC label)
+# pROC::roc(data = auc_graph_data, response = death_6weeks, predictor = nope, direction='>',
+#           plot=T, col="#374e55", print.auc=T, ci=T, ci.type = 'no',
+#           lwd=3, quiet=T, 
+#           #print.thres = c("Status 1A", "Status 1B", "Status 2"), 
+#           #print.thres = c("1A", "1B", "2"),
+#           print.thres = c("no"),
+#           print.thres.cex = 1.1, 
+#           print.thres.pattern= "Status%2.f",
+#           print.auc.cex = 1.2, 
+#           legacy.axes=T,
+#           print.auc.y = 0.4,
+#           identity = TRUE, # Add the identity line (diagonal)
+#           lty.identity = 2, # Line type for the identity line (2 for dotted)
+#           col.identity = "darkgrey")
+# 
+# # Second ROC curve (adds to the graph and prints the second AUC label at a new y-coordinate)
+# pROC::roc(data = auc_graph_data, response = death_6weeks, predictor = auc_status_without_exception, direction='>',
+#           plot=T, col="#df8f44", print.auc=T, ci=T, ci.type = 'no',
+#           lwd=3, quiet=T, 
+#           print.thres = c("no"), 
+#           print.thres.cex = 1.1, 
+#           print.thres.pattern= "Status%2.f",
+#           print.auc.cex = 1.2, 
+#           legacy.axes=T,
+#           add = T,
+#           print.auc.y = 0.35) # Adjust this value (e.g., 0.35, 0.45) to move the label
+# 
+# #text(x=0.05, y=1.02, labels='')
+# legend('bottomright', xpd = T, 
+#        legend = c('With Status Exceptions', 'No Status Exceptions'),
+#        col = c("#374e55", "#df8f44"), lwd=2.0, cex=1.0)
+# 
+# 
+# 
+# current = pROC::roc(data = auc_graph_data, response = death_6weeks, predictor = nope, direction='>',
+#           plot=T, col="#374e55", print.auc=T, ci=T, ci.type = 'no',
+#           lwd=3, quiet=T, 
+#           #print.thres = c("Status 1A", "Status 1B", "Status 2"), 
+#           #print.thres = c("1A", "1B", "2"),
+#           print.thres = c("no"),
+#           print.thres.cex = 1.1, 
+#           print.thres.pattern= "Status%2.f",
+#           print.auc.cex = 1.2, 
+#           legacy.axes=T,
+#           print.auc.y = 0.4,
+#           identity = TRUE, # Add the identity line (diagonal)
+#           lty.identity = 2, # Line type for the identity line (2 for dotted)
+#           col.identity = "darkgrey")
+# 
+# hypothetical = pROC::roc(data = auc_graph_data, response = death_6weeks, 
+#                          predictor = auc_status_without_exception, direction='>', 
+#                          plot=T, col="#df8f44", print.auc=T, ci=T, ci.type = 'no',
+#                          lwd=3, quiet=T, print.thres = c("no"), print.thres.cex = 1.1, print.thres.pattern= "Status%2.f",
+#                          print.auc.cex = 1.2, legacy.axes=T, print.auc.y = 0.35) 
+# 
+# 
+# currentvalues = coords(current, c(1, 2, 3))
+# hypotheticalvalues = coords(hypothetical, c(1, 2, 3))
+
+```
+
+
+

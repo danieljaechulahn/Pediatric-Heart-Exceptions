@@ -1,0 +1,452 @@
+---
+title: "C-Index and Time-Dependent AUC"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r c index}
+
+data_for_cindex = cand_hx_list_episodes_grouping %>% 
+  dplyr::select(WL_ID_CODE, INIT_AGE, TCR_DGN, start, end, death, EXCEPTION, STATUS) %>%
+  group_by(WL_ID_CODE) %>% arrange(WL_ID_CODE, start) %>%
+  mutate(
+    status_without_exception = case_when(
+      STATUS == "1B" & EXCEPTION == 1 ~ "2",
+      STATUS == "1A" & EXCEPTION == 1 ~ "1B",
+      TRUE ~ STATUS),
+    new_status_normal = case_when(
+      STATUS == "1A" ~ 1,
+      STATUS == "1B" ~ 2,
+      STATUS == "2" ~ 3),
+    new_status_hypothetical = case_when(
+      status_without_exception == "1A" ~ 1,
+      status_without_exception == "1B" ~ 2,
+      status_without_exception == "2" ~ 3),
+    death_6weeks = ifelse(death == 1 & end <= 42, 1, 0),
+    death_6weeks = ifelse(any(death_6weeks == 1), 1, 0)
+    )
+
+normalallocation <- coxph(Surv(start, end, death) ~ new_status_normal, data = data_for_cindex)
+data_for_cindex$normal_predict <- predict(normalallocation, data_for_cindex, type = "lp")
+get_normal_c <- function(data) {
+  r <- risksetAUC(
+    Stime = data$end,
+    entry = data$start,
+    status = data$death,
+    marker = data$normal_predict,
+    method = "Cox",
+    tmax = 365,
+    plot = F)
+  return(r$Cindex)
+}
+
+
+timeseriesdata_short1 <- data_for_cindex[ ,c("WL_ID_CODE", "start", "end", "death", "normal_predict")]
+timeseriesdata_nest1 <- timeseriesdata_short1 %>% nest(data = -WL_ID_CODE)
+
+set.seed(200)
+get_normal_c(data_for_cindex)
+
+n_iterations <- 1000
+bs <- rsample::bootstraps(timeseriesdata_nest1, times = n_iterations)
+auc_normal <- vector(length = n_iterations)
+
+for (i in 1:n_iterations) {
+  normal_c <- as_tibble(bs$splits[[i]]) %>% unnest(cols = c("data")) %>% as.data.frame()
+  auc_normal[i] <- get_normal_c(normal_c)
+}
+
+
+quantile(auc_normal, probs = c(0.025, 0.975))
+
+
+hypotheticalallocation <- coxph(Surv(start, end, death) ~ new_status_hypothetical, data = data_for_cindex)
+data_for_cindex$hypothetical_predict <- predict(hypotheticalallocation, data_for_cindex, type = "lp")
+get_hypothetical_c <- function(data) {
+  r <- risksetAUC(
+    Stime = data$end,
+    entry = data$start,
+    status = data$death,
+    marker = data$hypothetical_predict,
+    method = "Cox",
+    tmax = 365,
+    plot = F)
+  return(r$Cindex)
+}
+
+timeseriesdata_short2 <- data_for_cindex[ ,c("WL_ID_CODE", "start", "end", "death", "hypothetical_predict")]
+timeseriesdata_nest2 <- timeseriesdata_short2 %>% nest(data = -WL_ID_CODE)
+
+set.seed(200)
+get_hypothetical_c(data_for_cindex)
+
+
+n_iterations <- 1000
+bs1 <- rsample::bootstraps(timeseriesdata_nest2, times = n_iterations)
+auc_hypothetical <- vector(length = n_iterations)
+
+for (i in 1:n_iterations) {
+  hypothetical_c <- as_tibble(bs1$splits[[i]]) %>% unnest(cols = c("data")) %>% as.data.frame()
+  auc_hypothetical[i] <- get_hypothetical_c(hypothetical_c)
+}
+
+
+quantile(auc_hypothetical, probs = c(0.025, 0.975))
+
+library(compareC)
+
+compareC(data_for_cindex$end, data_for_cindex$death, data_for_cindex$new_status_normal, data_for_cindex$new_status_hypothetical)
+
+
+#The FOLLOWING CODE WAS REMOVED FROM MANUSCRIPT DURING REVISION
+
+# c_boxplot = boxplot(auc_normal, auc_hypothetical, names = c("With Exceptions", "Without Exceptions"), col = c("lightblue", "lightgreen"))
+# 
+# 
+# data_df <- data.frame(
+#   value = c(auc_normal, auc_hypothetical),
+#   group = factor(c(rep("With Exceptions", length(auc_normal)), rep("Without Exceptions", length(auc_hypothetical)))))
+#     
+# c_boxplot = ggplot(data_df, aes(x = group, y = value, fill = group)) +
+#   geom_boxplot() +
+#   labs(title = "",
+#        x = "Concordance Indices",
+#        y = "Value") +
+#   theme_classic() +
+#   scale_fill_manual(values = c("With Exceptions" = "#374e55", "Without Exceptions" = "#df8f44")) +
+#   ylim(0.65, 0.75) +
+#   theme(text = element_text(size = 20),
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.position = "none")
+#     
+# # Find max y-value to determine the annotation's vertical position
+# max_y <- max(data_df$value)
+# y_pos <- max_y + 0.005 # Position the bracket slightly above the highest point
+# 
+# # Annotation data frame for geom_segment and geom_text
+# signif_annot <- data.frame(
+#   x_start = 1, # x-position of "With Exceptions"
+#   x_end = 2,   # x-position of "Without Exceptions"
+#   y_bar = y_pos,
+#   y_text = y_pos + 0.002,
+#   label = "***"
+# )
+# 
+# # Create the boxplot with the manually added significance indicator
+# c_boxplot <- ggplot(data_df, aes(x = group, y = value, fill = group)) +
+#   geom_boxplot() +
+#   labs(title = "",
+#        x = "Concordance Indices",
+#        y = "Value") +
+#   theme_classic() +
+#   scale_fill_manual(values = c("With Exceptions" = "#374e55", "Without Exceptions" = "#df8f44")) +
+#   ylim(0.65, 0.75) +
+#   theme(text = element_text(size = 20),
+#         axis.text.x = element_text(size = 18),
+#         axis.title.x = element_text(size = 20),
+#         axis.text.y = element_text(size = 18),
+#         axis.title.y = element_text(size = 20),
+#         legend.position = "none") +
+#   # Add horizontal segment for the bracket
+#   geom_segment(data = signif_annot, aes(x = x_start, xend = x_end, y = y_bar, yend = y_bar), inherit.aes = FALSE) +
+#   # Add vertical tips to the bracket
+#   geom_segment(data = signif_annot, aes(x = x_start, xend = x_start, y = y_bar, yend = y_bar - 0.001), inherit.aes = FALSE) +
+#   geom_segment(data = signif_annot, aes(x = x_end, xend = x_end, y = y_bar, yend = y_bar - 0.001), inherit.aes = FALSE) +
+#   # Add the significance text
+#   geom_text(data = signif_annot, aes(x = (x_start + x_end) / 2, y = y_text, label = label), size = 7, inherit.aes = FALSE)
+
+```
+
+
+``` {r time-dependent auc}
+
+#THIS CREATES FIGURE 5
+
+get_time_dependent_auc <- function(data, marker_col) {
+  roc_result <- risksetAUC(
+    Stime = data$end,
+    entry = data$start,
+    status = data$death,
+    marker = data[[marker_col]],
+    method = "Cox",
+    tmax = 365,
+    plot = FALSE
+  )
+  
+  tibble(
+    time = roc_result$utimes,
+    auc = roc_result$AUC,
+    c_index = roc_result$Cindex
+  )
+}
+
+# ============================================================================
+# SECTION 3: Calculate Point Estimates
+# ============================================================================
+
+set.seed(200)
+auc_normal_point <- get_time_dependent_auc(data_for_cindex, "normal_predict")
+auc_hypothetical_point <- get_time_dependent_auc(data_for_cindex, "hypothetical_predict")
+
+cat("Normal allocation C-index:", round(auc_normal_point$c_index[1], 3), "\n")
+cat("Hypothetical allocation C-index:", round(auc_hypothetical_point$c_index[1], 3), "\n\n")
+
+# ============================================================================
+# SECTION 4: Bootstrap
+# ============================================================================
+
+# Prepare nested data
+timeseriesdata_nest <- data_for_cindex %>%
+  select(WL_ID_CODE, start, end, death, normal_predict, hypothetical_predict) %>%
+  nest(data = -WL_ID_CODE)
+
+set.seed(200)
+n_iterations <- 1000
+
+cat("Running", n_iterations, "bootstrap iterations...\n\n")
+
+# Create bootstrap samples
+bs <- bootstraps(timeseriesdata_nest, times = n_iterations)
+
+# Bootstrap for Normal allocation
+cat("Bootstrap for Normal allocation...\n")
+auc_normal_bootstrap <- map(1:n_iterations, function(i) {
+  if (i %% 100 == 0) cat("  Iteration", i, "/", n_iterations, "\n")
+  
+  boot_data <- as_tibble(bs$splits[[i]]) %>% 
+    unnest(cols = c(data))
+  
+  get_time_dependent_auc(boot_data, "normal_predict") %>%
+    mutate(iteration = i)
+})
+
+auc_normal_bootstrap_df <- bind_rows(auc_normal_bootstrap)
+
+# Bootstrap for Hypothetical allocation
+cat("\nBootstrap for Hypothetical allocation...\n")
+auc_hypothetical_bootstrap <- map(1:n_iterations, function(i) {
+  if (i %% 100 == 0) cat("  Iteration", i, "/", n_iterations, "\n")
+  
+  boot_data <- as_tibble(bs$splits[[i]]) %>% 
+    unnest(cols = c(data))
+  
+  get_time_dependent_auc(boot_data, "hypothetical_predict") %>%
+    mutate(iteration = i)
+})
+
+auc_hypothetical_bootstrap_df <- bind_rows(auc_hypothetical_bootstrap)
+
+cat("\nBootstrap complete!\n\n")
+
+# ============================================================================
+# SECTION 5: Interpolate to Fixed Time Grid (NEW SECTION - GOES HERE)
+# ============================================================================
+
+cat("Interpolating to fixed time grid...\n")
+
+# Define fixed time grid
+time_grid <- seq(0, 365, by = 5)  # Every 5 days
+
+# Function to interpolate one bootstrap iteration
+interpolate_one_bootstrap <- function(df) {
+  # Handle edge cases
+  if (nrow(df) < 2) {
+    return(tibble(time = time_grid, auc = NA_real_))
+  }
+  
+  tryCatch({
+    interpolated_auc <- approx(
+      x = df$time,
+      y = df$auc,
+      xout = time_grid,
+      method = "linear",
+      rule = 2
+    )$y
+    
+    tibble(time = time_grid, auc = interpolated_auc)
+  }, error = function(e) {
+    # If interpolation fails, return NAs
+    tibble(time = time_grid, auc = NA_real_)
+  })
+}
+
+# Nest by iteration and interpolate
+# Normal allocation
+auc_normal_interpolated <- auc_normal_bootstrap_df %>%
+  nest(data = c(time, auc, c_index)) %>%
+  mutate(interpolated = map(data, interpolate_one_bootstrap)) %>%
+  dplyr::select(iteration, interpolated) %>%
+  unnest(interpolated)
+
+# Check for any NAs
+n_na_normal <- sum(is.na(auc_normal_interpolated$auc))
+if (n_na_normal > 0) {
+  cat("Warning:", n_na_normal, "NA values in normal allocation interpolation\n")
+}
+
+# Hypothetical allocation
+auc_hypothetical_interpolated <- auc_hypothetical_bootstrap_df %>%
+  nest(data = c(time, auc, c_index)) %>%
+  mutate(interpolated = map(data, interpolate_one_bootstrap)) %>%
+  dplyr::select(iteration, interpolated) %>%
+  unnest(interpolated)
+
+# Check for any NAs
+n_na_hypo <- sum(is.na(auc_hypothetical_interpolated$auc))
+if (n_na_hypo > 0) {
+  cat("Warning:", n_na_hypo, "NA values in hypothetical allocation interpolation\n")
+}
+
+cat("Interpolation complete!\n\n")
+
+# ============================================================================
+# SECTION 6: Calculate Confidence Intervals at Fixed Time Points
+# ============================================================================
+
+# Normal allocation CIs
+auc_normal_ci_fixed <- auc_normal_interpolated %>%
+  group_by(time) %>%
+  summarise(
+    mean_auc = mean(auc, na.rm = TRUE),
+    ci_lower = quantile(auc, 0.025, na.rm = TRUE),
+    ci_upper = quantile(auc, 0.975, na.rm = TRUE),
+    n_samples = sum(!is.na(auc)),  # Count non-NA samples
+    .groups = "drop"
+  )
+
+# Hypothetical allocation CIs
+auc_hypothetical_ci_fixed <- auc_hypothetical_interpolated %>%
+  group_by(time) %>%
+  summarise(
+    mean_auc = mean(auc, na.rm = TRUE),
+    ci_lower = quantile(auc, 0.025, na.rm = TRUE),
+    ci_upper = quantile(auc, 0.975, na.rm = TRUE),
+    n_samples = sum(!is.na(auc)),
+    .groups = "drop"
+  )
+
+# Interpolate point estimates to same grid
+auc_normal_point_interpolated <- tibble(
+  time = time_grid,
+  point_estimate = approx(
+    auc_normal_point$time, 
+    auc_normal_point$auc, 
+    xout = time_grid, 
+    rule = 2
+  )$y
+)
+
+auc_hypothetical_point_interpolated <- tibble(
+  time = time_grid,
+  point_estimate = approx(
+    auc_hypothetical_point$time, 
+    auc_hypothetical_point$auc, 
+    xout = time_grid, 
+    rule = 2
+  )$y
+)
+
+# Combine with CIs
+auc_normal_ci_final <- auc_normal_ci_fixed %>%
+  left_join(auc_normal_point_interpolated, by = "time") %>%
+  mutate(system = "Normal Allocation")
+
+auc_hypothetical_ci_final <- auc_hypothetical_ci_fixed %>%
+  left_join(auc_hypothetical_point_interpolated, by = "time") %>%
+  mutate(system = "Hypothetical Allocation")
+
+# Combine both systems
+auc_combined_ci <- bind_rows(auc_normal_ci_final, auc_hypothetical_ci_final)
+
+# Verify
+cat("=== Verification ===\n")
+cat("Normal allocation samples per time point - min:", 
+    min(auc_normal_ci_fixed$n_samples), 
+    "max:", max(auc_normal_ci_fixed$n_samples), "\n")
+cat("Hypothetical allocation samples per time point - min:", 
+    min(auc_hypothetical_ci_fixed$n_samples), 
+    "max:", max(auc_hypothetical_ci_fixed$n_samples), "\n")
+cat("Number of time points:", length(time_grid), "\n\n")
+
+# ============================================================================
+# SECTION 7: Plot Time-Dependent AUC with Confidence Bands
+# ============================================================================
+
+auc_plot <- ggplot(auc_combined_ci, 
+                   aes(x = time, y = point_estimate, 
+                       color = system, fill = system)) +
+  
+  #geom_hline(yintercept = 0.5, linetype = "dashed", 
+  #           color = "gray50", linewidth = 0.5) +
+  
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), 
+              alpha = 0.2, color = NA) +
+  
+  geom_line(linewidth = 1.2) +
+  
+  scale_color_manual(
+    values = c(
+      "Normal Allocation" = "#DF8F44",
+      "Hypothetical Allocation" = "#374E55"
+    ),
+    labels = c(
+      "Normal Allocation" = "Current 3-Status System",
+      "Hypothetical Allocation" = "Hypothetical Allocation\nwithout Exceptions"
+    ),
+    name = ""
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "Normal Allocation" = "#DF8F44",
+      "Hypothetical Allocation" = "#374E55"
+    ),
+    labels = c(
+      "Normal Allocation" = "Current 3-Status System",
+      "Hypothetical Allocation" = "Hypothetical Allocation\nwithout Exceptions"
+    ),
+    name = ""
+  ) +
+  
+  scale_x_continuous(
+    breaks = seq(0, 365, 60),
+    limits = c(0, 365)
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0.6, 0.85),
+    breaks = seq(0.6, 0.85, 0.05)
+  ) +
+  
+  labs(
+    x = "Days after Initial Listing",
+    y = "Time-Dependent AUC",
+    #title = "Discrimination Performance Over Time",
+    #subtitle = "Shaded bands represent 95% bootstrap confidence intervals",
+    #caption = "Dashed line represents AUC = 0.5 (no discrimination)"
+  ) +
+  
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position.inside = c(0.8, 0.2),  # CHANGED: was legend.position
+    legend.text = element_text(size = 16),
+    #legend.background = element_rect(fill = "white", color = "black", linewidth = 0.3),
+    plot.title = element_text(face = "bold", size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 16, hjust = 0),
+    plot.caption = element_text(size = 16, hjust = 0, color = "gray40"),
+    axis.title = element_text(face = "bold", size = 16),
+    axis.text.x = element_text(size = 16),  # INCREASE X-AXIS NUMBERS
+    axis.text.y = element_text(size = 16),  # INCREASE Y-AXIS NUMBERS
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.3)
+  )
+
+print(auc_plot)
+
+```

@@ -1,0 +1,702 @@
+---
+title: "Cumulative Incidence Plots"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r cif development}
+
+#this code creates Figure 2
+
+admin_censor_date = as.Date("2025-06-30")
+
+init_status_1a = fortable1 %>% 
+  filter(initial_status == "1A") %>%
+  mutate(
+    competing_outcome = case_when(
+      REM_CD %in% c(8, 13) ~ 1,
+      !is.na(TX_DATE) & REM_CD == 4 ~ 2,
+      REM_CD == 12 ~ 3,
+      TRUE ~ 0),
+    competing_outcome_date = case_when(
+      competing_outcome != 0 ~ END_DATE,
+      competing_outcome == 0 & !is.na(REM_CD) ~ END_DATE,
+      TRUE ~ admin_censor_date),
+    competing_outcome = as.factor(competing_outcome),
+    competing_time = as.numeric(competing_outcome_date - INIT_DATE)) %>%
+  mutate(
+    death = ifelse(REM_CD %in% c(8, 13), 1, 0),
+    end_date = case_when(
+      death == 1 ~ END_DATE,
+      death == 0 & !is.na(REM_CD) ~ END_DATE,
+      TRUE ~ admin_censor_date),
+    time = as.numeric(end_date - INIT_DATE),
+    status_1a_just_labels = case_when(
+      STATUS_JUST == "Status 1A: Exception" ~ "Exception",
+      STATUS_JUST == "Status 1A: Congenital Heart Disease" ~ "Congenital Heart Disease with Inotropes",
+      STATUS_JUST == "Status 1A: Ductal-Dependent Circulation" ~ "Ductal-Dependent Circulation",
+      STATUS_JUST == "Status 1A: MCS/IABP" ~ "MCS/IABP",
+      STATUS_JUST == "Status 1A: Mechanical Ventilation" ~ "Mechanical Ventilation"),
+    status_1a_just_labels = factor(status_1a_just_labels, c("Exception", "Congenital Heart Disease with Inotropes", "Ductal-Dependent Circulation", "MCS/IABP", "Mechanical Ventilation")))
+
+
+
+init_status_1b = fortable1 %>% 
+  filter(initial_status == "1B") %>%
+  mutate(
+    competing_outcome = case_when(
+      REM_CD %in% c(8, 13) ~ 1,
+      !is.na(TX_DATE) & REM_CD == 4 ~ 2,
+      REM_CD == 12 ~ 3,
+      TRUE ~ 0),
+    competing_outcome_date = case_when(
+      competing_outcome != 0 ~ END_DATE,
+      competing_outcome == 0 & !is.na(REM_CD) ~ END_DATE,
+      TRUE ~ admin_censor_date),
+    competing_outcome = as.factor(competing_outcome),
+    competing_time = as.numeric(competing_outcome_date - INIT_DATE)) %>%
+  mutate(
+    death = ifelse(REM_CD %in% c(8, 13), 1, 0),
+    end_date = case_when(
+      death == 1 ~ END_DATE,
+      death == 0 & !is.na(REM_CD) ~ END_DATE,
+      TRUE ~ admin_censor_date),
+    time = as.numeric(end_date - INIT_DATE),
+    status_1b_just_labels = case_when(
+      STATUS_JUST == "Status 1B: Exception" ~ "Exception",
+      STATUS_JUST == "Status 1B: Standard 1B Listing" ~ "Standard Listing"),
+    status_1b_just_labels = factor(status_1b_just_labels, c("Exception", "Standard Listing")))
+
+```
+
+``` {r figure 1}
+
+fortable1 = fortable1 %>%
+  mutate(
+    competing_outcome = case_when(
+      REM_CD %in% c(8, 13) ~ 1,
+      !is.na(TX_DATE) & REM_CD == 4 ~ 2,
+      REM_CD == 12 ~ 3,
+      TRUE ~ 0),
+    competing_outcome_date = case_when(
+      competing_outcome != 0 ~ END_DATE,
+      competing_outcome == 0 & !is.na(REM_CD) ~ END_DATE,
+      TRUE ~ admin_censor_date),
+    competing_time = as.numeric(competing_outcome_date - INIT_DATE))
+
+justtransplants = fortable1 %>% filter(competing_outcome == 2) 
+median(justtransplants$competing_time)
+
+just1a = fortable1 %>% filter(initial_status == "1A")
+summary(just1a$competing_time)
+
+just1b = fortable1 %>% filter(initial_status == "1B")
+summary(just1b$competing_time)
+
+just2 = fortable1 %>% filter(initial_status == "2")
+summary(just2$competing_time)
+
+options("ggsurvfit.switch-color-linetype" = TRUE)
+
+cif_fit = cuminc(Surv(competing_time, as.factor(competing_outcome)) ~ 1, data = fortable1)
+
+cif_fit = cif_fit %>%
+  ggcuminc(outcome = c("1", "2", "3")) +
+  add_confidence_interval() +
+  coord_cartesian(xlim = c(0, 360)) +
+  scale_x_continuous(breaks = c(0, 60, 120, 180, 240, 300, 360)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  add_risktable(times = seq(0, 360, 60), size = 6,
+                theme = theme_risktable_default(axis.text.y.size = 18)) +
+  scale_x_continuous(limits = c(0, 360), breaks = seq(0, 360, 60)) +
+  scale_color_manual(name = "Outcome",
+                     values = c("1" = "#374e55", "2" = "#df8f44", "3" = "#00a1d5"),
+                     labels = c("Death/Clinical Deterioration", "Transplant", "Removal for Clinical Recovery")) +
+  scale_fill_manual(name = "Outcome",
+                    values = c("1" = "#374e55", "2" = "#df8f44", "3" = "#00a1d5"),
+                    labels = c("Death/Clinical Deterioration", "Transplant", "Removal for Clinical Recovery")) +
+  labs(x = "Days after Initial Listing", y = "Cumulative Incidence") +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20),
+        strip.text.y = element_text(size = 18))
+
+# Fit the cumulative incidence model
+cif_model <- cuminc(Surv(competing_time, as.factor(competing_outcome)) ~ 1, 
+                    data = fortable1)
+
+# Extract cumulative incidence at 365 days (or closest timepoint)
+cif_365 <- cif_model %>%
+  tidy() %>%
+  filter(time <= 365) %>%
+  group_by(outcome) %>%
+  slice_max(time, n = 1) %>%
+  ungroup() %>%
+  select(outcome, time, estimate, conf.low, conf.high)
+
+print(cif_365)
+
+# Format as table
+cif_365 %>%
+  mutate(
+    outcome_label = case_when(
+      outcome == "1" ~ "Death/Clinical Deterioration",
+      outcome == "2" ~ "Transplant",
+      outcome == "3" ~ "Removal for Clinical Recovery"
+    ),
+    `Cumulative Incidence (95% CI)` = sprintf("%.1f%% (%.1f%% - %.1f%%)", 
+                                               estimate*100, conf.low*100, conf.high*100)
+  ) %>%
+  select(Outcome = outcome_label, `Days` = time, `Cumulative Incidence (95% CI)`)
+
+
+just1a1b = fortable1 %>% filter(initial_status != "2")
+
+cif_fit1 = cuminc(Surv(competing_time, as.factor(competing_outcome)) ~ initial_status, data = fortable1)
+
+
+cif_fit1 = cif_fit1 %>%
+  ggcuminc(outcome = c("1", "2", "3")) +
+  add_confidence_interval() +
+  coord_cartesian(xlim = c(0, 360)) +
+  scale_x_continuous(breaks = c(0, 60, 120, 180, 240, 300, 360)) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  add_risktable(
+    times = seq(0, 360, 60), 
+    size = 6,
+    risktable_height = 0.2,
+    theme = list(
+      theme_risktable_default(
+        axis.text.y.size = 16,      # Controls "At Risk" and "Events" labels
+        plot.title.size = 16         # Controls "1A" and "1B" strata labels
+      ),
+      theme(panel.spacing.y = unit(1, "pt"))
+      #theme(plot.margin = margin(t = -5, r = 5, b = -5, l = 5, unit = "pt"))  # Reduce spacing between rows
+    )
+  ) +
+  scale_x_continuous(limits = c(0, 360), breaks = seq(0, 360, 60)) +
+  scale_color_manual(name = "Outcome",
+                     values = c("1" = "#b24745", "2" = "#00a1d5", "3" = "#374e55"),
+                     labels = c("Death/Clinical Deterioration", "Transplant", "Removal for Clinical Recovery")) +
+  scale_fill_manual(name = "Outcome",
+                    values = c("1" = "#b24745", "2" = "#00a1d5", "3" = "#374e55"),
+                    labels = c("Death/Clinical Deterioration", "Transplant", "Removal for Clinical Recovery")) +
+  scale_linetype_manual(name = "Status at Initial Listing",
+                        values = c("1A" = "solid", "1B" = "dashed", "2" = "dotted"),
+                        labels = c("1A", "1B", "2")) +
+  guides(color = guide_legend(nrow = 3, byrow = TRUE),    # Force Outcome legend into 3 rows
+         fill = guide_legend(nrow = 3, byrow = TRUE)) +
+  guides(linetype = guide_legend(nrow = 3, byrow = TRUE,
+                                 override.aes = list(fill = NA))) +
+  labs(x = "Days after Initial Listing", y = "Cumulative Incidence") +
+  theme_classic() +
+  theme(text = element_text(size = 16),
+        axis.text.x = element_text(size = 16),
+        axis.title.x = element_text(size = 16),
+        axis.text.y = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 16),
+        legend.position = "bottom",              # Move legends to bottom
+        legend.box = "horizontal",  # Stack legends horizontally
+        strip.text.y = element_text(size = 16))
+
+# Fit the cumulative incidence model
+cif_model1 <- cuminc(Surv(competing_time, as.factor(competing_outcome)) ~ initial_status, 
+                     data = fortable1)
+
+# Extract cumulative incidence at 365 days (or closest timepoint)
+cif_365 <- cif_model1 %>%
+  tidy() %>%
+  filter(time <= 365) %>%
+  group_by(outcome) %>%
+  slice_max(time, n = 1) %>%
+  ungroup() %>%
+  select(outcome, time, estimate, conf.low, conf.high)
+
+print(cif_365)
+
+# Format as table
+cif_365 %>%
+  mutate(
+    outcome_label = case_when(
+      outcome == "1" ~ "Death/Clinical Deterioration",
+      outcome == "2" ~ "Transplant",
+      outcome == "3" ~ "Removal for Clinical Recovery"
+    ),
+    `Cumulative Incidence (95% CI)` = sprintf("%.1f%% (%.1f%% - %.1f%%)", 
+                                               estimate*100, conf.low*100, conf.high*100)
+  ) %>%
+  select(Outcome = outcome_label, `Days` = time, `Cumulative Incidence (95% CI)`)
+
+
+library(tidycmprsk)
+
+
+
+deaths = cand_hx_list_episodes_grouping %>% filter(death == 1)
+table(deaths$STATUS)
+
+
+
+
+
+library(tidycmprsk)
+library(gtsummary)
+
+# Fine-Gray regression for each outcome
+# Outcome 1: Death/Clinical Deterioration
+crr_outcome1 <- crr(
+  Surv(competing_time, as.factor(competing_outcome)) ~ initial_status, 
+  data = fortable1,
+  failcode = "1"  # The outcome of interest
+)
+
+# Outcome 2: Transplant
+crr_outcome2 <- crr(
+  Surv(competing_time, as.factor(competing_outcome)) ~ initial_status, 
+  data = fortable1,
+  failcode = "2"
+)
+
+# Outcome 3: Removal for Clinical Recovery
+crr_outcome3 <- crr(
+  Surv(competing_time, as.factor(competing_outcome)) ~ initial_status, 
+  data = fortable1,
+  failcode = "3"
+)
+
+# View results with tbl_regression
+tbl_regression(crr_outcome1, exponentiate = TRUE)
+tbl_regression(crr_outcome2, exponentiate = TRUE)
+tbl_regression(crr_outcome3, exponentiate = TRUE)
+
+# Or get summary statistics
+summary(crr_outcome1)
+summary(crr_outcome2)
+summary(crr_outcome3)
+
+
+p1 <- tidy(crr_outcome1)$p.value[1]
+p2 <- tidy(crr_outcome2)$p.value[1]
+p3 <- tidy(crr_outcome3)$p.value[1]
+
+# Format p-values
+p1_text <- ifelse(p1 < 0.001, "p < 0.001", sprintf("p = %.3f", p1))
+p2_text <- ifelse(p2 < 0.001, "p < 0.001", sprintf("p = %.3f", p2))
+p3_text <- ifelse(p3 < 0.001, "p < 0.001", sprintf("p = %.3f", p3))
+
+# Add to plot
+cif_fit1 +
+  annotate("text", x = 100, y = 0.95, 
+           label = paste0("Death/Deterioration: ", p1_text),
+           size = 5, hjust = 1) +
+  annotate("text", x = 100, y = 0.90, 
+           label = paste0("Transplant: ", p2_text),
+           size = 5, hjust = 1) +
+  annotate("text", x = 100, y = 0.85, 
+           label = paste0("Clinical Recovery: ", p3_text),
+           size = 5, hjust = 1)
+
+
+
+
+```
+
+``` {r create fig 2}
+
+library(tidyverse)
+library(survival)
+library(cmprsk)
+library(tidycmprsk)
+library(ggsurvfit)
+library(ggsci)
+library(scales)
+# Your dataset is ready - init_status_1a
+
+# Verify the competing outcome coding
+table(init_status_1a$competing_outcome, useNA = "always")
+# 0 = censored, 1 = death/deterioration, 2 = transplant, 3 = recovery
+
+# Verify STATUS_JUST labels
+table(init_status_1a$status_1a_just_labels, useNA = "always")
+
+# Remove any missing STATUS_JUST
+init_status_1a_clean <- init_status_1a %>%
+  filter(!is.na(status_1a_just_labels))
+
+# ============================================================================
+# METHOD 1: Using tidycmprsk (Recommended - easier and cleaner)
+# ============================================================================
+
+# Create cumulative incidence object
+cuminc_obj <- cuminc(
+  Surv(competing_time, competing_outcome) ~ status_1a_just_labels,
+  data = init_status_1a_clean
+)
+
+# Test for differences between groups
+# This tests if cumulative incidence curves differ by STATUS_JUST
+# for outcome = 1 (death/deterioration)
+print(cuminc_obj)
+
+# Extract p-value for death/deterioration outcome
+cif_direct <- cmprsk::cuminc(
+  ftime = init_status_1a_clean$competing_time,
+  fstatus = init_status_1a_clean$competing_outcome,
+  group = init_status_1a_clean$status_1a_just_labels,
+  cencode = 0
+)
+
+# Print test results
+print("\n=== Gray's Test Results ===")
+print(cif_direct$Tests)
+
+# Extract p-value for outcome 1 (death/deterioration)
+# Row 1 = outcome 1, Column 2 = p-value
+pval_death <- cif_direct$Tests[1, 2]
+cat("\nP-value for death/deterioration:", pval_death, "\n")
+
+# Format p-value for plot
+pval_text <- if_else(pval_death < 0.001, 
+                     "Gray's test p < 0.001",
+                     sprintf("Gray's test p = %.3f", pval_death))
+
+# ============================================================================
+# Cumulative Incidence Analysis for Status 1A by Indication
+# ============================================================================
+
+library(tidyverse)
+library(survival)
+library(cmprsk)
+library(tidycmprsk)
+library(ggsurvfit)
+
+# ============================================================================
+# Get p-value using cmprsk directly
+# ============================================================================
+
+cif_direct <- cmprsk::cuminc(
+  ftime = init_status_1a_clean$competing_time,
+  fstatus = init_status_1a_clean$competing_outcome,
+  group = init_status_1a_clean$status_1a_just_labels,
+  cencode = 0
+)
+
+# Extract p-value for outcome 1 (death/deterioration)
+pval_death <- cif_direct$Tests[1, 2]
+cat("P-value for death/deterioration:", pval_death, "\n")
+
+# Format p-value for plot
+pval_text <- if_else(pval_death < 0.001, 
+                     "Gray's test p < 0.001",
+                     sprintf("Gray's test p = %.3f", pval_death))
+
+# ============================================================================
+# Create tidycmprsk object for plotting
+# ============================================================================
+
+cuminc_obj <- cuminc(
+  Surv(competing_time, competing_outcome) ~ status_1a_just_labels,
+  data = init_status_1a_clean
+)
+
+fig <- cuminc_obj %>%
+  ggcuminc(outcome = "1", linewidth = 1.2) +
+  add_confidence_interval() +
+  
+  scale_color_manual(
+    values = c(
+      "Exception" = "#374e55",
+      "Congenital Heart Disease with Inotropes" = "#79af97",
+      "Ductal-Dependent Circulation" = "#b24745",
+      "MCS/IABP" = "#00a1d5",
+      "Mechanical Ventilation" = "#df8f44"
+    ),
+    name = NULL  # Remove legend title
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "Exception" = "#374e55",
+      "Congenital Heart Disease with Inotropes" = "#79af97",
+      "Ductal-Dependent Circulation" = "#b24745",
+      "MCS/IABP" = "#00a1d5",
+      "Mechanical Ventilation" = "#df8f44"
+    ),
+    name = NULL  # Remove legend title
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, 0.4),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  
+  scale_x_continuous(
+    limits = c(0, 365),
+    breaks = seq(0, 365, 60),
+    expand = expansion(mult = c(0.05, 0.05))
+  ) +
+  
+  labs(
+    x = "Days after Initial Listing",
+    y = "Cumulative Incidence of Death\nor Clinical Deterioration",
+    title = ""
+  ) +
+  
+  guides(
+    color = guide_legend(nrow = 2, byrow = TRUE),
+    fill = guide_legend(nrow = 2, byrow = TRUE),
+    linetype = guide_legend(nrow = 2, byrow = TRUE, override.aes = list(fill = NA))
+  ) +
+  
+  annotate(
+    "text",
+    x = 90, y = 0.35,
+    label = pval_text,
+    size = 4,
+    hjust = 1
+  ) +
+  
+  theme_classic(base_size = 14) +
+  theme(
+    legend.title = element_blank(),  # Use element_blank() not element_text("")
+    legend.text = element_text(size = 14),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    axis.title = element_text(face = "bold", size = 14),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0),
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.3)
+  ) +
+  
+  add_risktable(
+    times = seq(0, 360, 60),
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 14,
+      plot.title.size = 14
+    )
+  )
+
+print(fig)
+
+
+# Create cuminc object (if not already created)
+cuminc_obj <- cuminc(
+  Surv(competing_time, competing_outcome) ~ status_1a_just_labels,
+  data = init_status_1a_clean
+)
+
+
+ci_all_outcomes <- cuminc_obj %>%
+  tidy() %>%
+  filter(time <= 365) %>%
+  group_by(strata, outcome) %>%
+  slice_max(time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    outcome_label = case_when(
+      outcome == "1" ~ "Death/Deterioration",
+      outcome == "2" ~ "Transplant",
+      outcome == "3" ~ "Recovery",
+      TRUE ~ "Other"
+    ),
+    ci_percent = estimate * 100,
+    ci_formatted = sprintf("%.1f%% (%.1f%%, %.1f%%)", 
+                           estimate * 100, 
+                           conf.low * 100, 
+                           conf.high * 100)
+  ) %>%
+  dplyr::select(strata, outcome, outcome_label, time, 
+         ci_percent, estimate, conf.low, conf.high, ci_formatted)
+
+print("\n=== Cumulative Incidence at 365 Days - All Outcomes ===")
+print(ci_all_outcomes)
+
+```
+
+
+``` {r for status 1b}
+
+
+#This code creates Supplemental Figure 6
+
+# Verify the competing outcome coding
+table(init_status_1b$competing_outcome, useNA = "always")
+# 0 = censored, 1 = death/deterioration, 2 = transplant, 3 = recovery
+
+# Verify STATUS_JUST labels
+table(init_status_1b$status_1b_just_labels, useNA = "always")
+
+# Remove any missing STATUS_JUST
+init_status_1b_clean <- init_status_1b %>%
+  filter(!is.na(status_1b_just_labels))
+
+# ============================================================================
+# METHOD 1: Using tidycmprsk (Recommended - easier and cleaner)
+# ============================================================================
+
+# Create cumulative incidence object
+cuminc_obj1b <- cuminc(
+  Surv(competing_time, competing_outcome) ~ status_1b_just_labels,
+  data = init_status_1b_clean
+)
+
+# Test for differences between groups
+# This tests if cumulative incidence curves differ by STATUS_JUST
+# for outcome = 1 (death/deterioration)
+print(cuminc_obj1b)
+
+# Extract p-value for death/deterioration outcome
+cif_direct1b <- cmprsk::cuminc(
+  ftime = init_status_1b_clean$competing_time,
+  fstatus = init_status_1b_clean$competing_outcome,
+  group = init_status_1b_clean$status_1b_just_labels,
+  cencode = 0
+)
+
+# Print test results
+print("\n=== Gray's Test Results ===")
+print(cif_direct1b$Tests)
+
+# Extract p-value for outcome 1 (death/deterioration)
+# Row 1 = outcome 1, Column 2 = p-value
+pval_death <- cif_direct1b$Tests[1, 2]
+cat("\nP-value for death/deterioration:", pval_death, "\n")
+
+# Format p-value for plot
+pval_text <- if_else(pval_death < 0.001, 
+                     "Gray's test p < 0.001",
+                     sprintf("Gray's test p = %.3f", pval_death))
+
+# ============================================================================
+# Cumulative Incidence Analysis for Status 1B by Indication
+# ============================================================================
+
+library(tidyverse)
+library(survival)
+library(cmprsk)
+library(tidycmprsk)
+library(ggsurvfit)
+
+# ============================================================================
+# Get p-value using cmprsk directly
+# ============================================================================
+
+
+fig1 <- cuminc_obj1b %>%
+  ggcuminc(outcome = "1", linewidth = 1.2) +
+  add_confidence_interval() +
+  
+  scale_color_manual(
+    values = c(
+      "Exception" = "#374e55",
+      "Standard Listing" = "#b24745"
+    ),
+    name = NULL
+  ) +
+  
+  scale_fill_manual(
+    values = c(
+      "Exception" = "#374e55",
+      "Standard Listing" = "#b24745"
+    ),
+    name = NULL
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, 0.2),
+    labels = scales::percent, 
+    expand = c(0.01, 0)
+  ) +
+  
+  scale_x_continuous(
+    limits = c(0, 365),
+    breaks = seq(0, 365, 60),
+    expand = expansion(mult = c(0.05, 0.05))
+  ) +
+  
+  labs(
+    x = "Days after Initial Listing",
+    y = "Cumulative Incidence",
+    #title = "Cumulative Incidence by Status 1A Indication"
+  ) +
+  
+  guides(
+    color = guide_legend(nrow = 1, byrow = TRUE),
+    fill = guide_legend(nrow = 1, byrow = TRUE),
+    linetype = guide_legend(nrow = 1, byrow = TRUE, override.aes = list(fill = NA))
+  ) +
+  
+  annotate(
+    "text",
+    x = 300, y = 0.15,
+    label = pval_text,
+    size = 5,
+    hjust = 1
+  ) +
+  
+  theme_classic(base_size = 14) +
+  theme(
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    axis.title = element_text(face = "bold", size = 14),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0),
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.3)
+  ) +
+  
+  add_risktable(
+    times = seq(0, 360, 60),
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 14,
+      plot.title.size = 14
+    )
+  )
+
+print(fig1)
+
+
+
+# ============================================================================
+# Get Cumulative Incidence at 1 Year
+# ============================================================================
+
+ci_at_1year_1b <- cuminc_obj1b %>%
+  tidy() %>%
+  filter(outcome == "1", time <= 365) %>%
+  group_by(strata) %>%
+  slice_max(time, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    ci_formatted = sprintf("%.1f%% (%.1f%%, %.1f%%)", 
+                          estimate * 100, conf.low * 100, conf.high * 100)
+  ) %>%
+  dplyr::select(strata, time, estimate, conf.low, conf.high, ci_formatted)
+
+print("\n=== Cumulative Incidence at 1 Year ===")
+print(ci_at_1year_1b)
+
+```
+
+

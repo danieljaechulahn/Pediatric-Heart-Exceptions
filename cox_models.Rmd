@@ -1,0 +1,920 @@
+---
+title: "Mixed-Effects Cox Models"
+output: html_document
+date: "2025-12-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r Primary Model 1}    
+second_model_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+# second_model_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + STATUS + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes)
+
+
+summary(second_model_death)
+exp(confint(second_model_death))
+
+second_plot_death = plot_model(
+  second_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c(
+    "Status (Ref 2): 1A",
+    "Status (Ref 2): 1B",
+    "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+```
+
+
+``` {r Primary Model 1 Assumptions Testing}
+
+library(survival)
+library(coxme)
+library(car)
+library(dplyr)
+
+
+# Fit regular Cox without random effects
+cox_regular <- coxph(Surv(start, end, death) ~ EXCEPTION + STATUS, 
+                     data = cand_hx_list_episodes_grouping)
+ph_test <- cox.zph(cox_regular)
+print(ph_test)  # p > 0.05 = assumption met
+plot(ph_test)   # Flat lines = good
+
+# 2. Check normality of random effects (frailty)
+frailty_values <- ranef(second_model_death)$LISTING_CTR_CODE
+
+# QQ plot
+qqnorm(frailty_values, main = "Q-Q Plot of Center Random Effects")
+qqline(frailty_values, col = "red")
+
+# Shapiro-Wilk test
+shapiro.test(frailty_values)  # p > 0.05 = normal
+
+# Histogram
+hist(frailty_values, breaks = 20,
+     main = "Distribution of Center Random Effects (Frailty)",
+     xlab = "Random Effect")
+
+# 3. Check multicollinearity
+vif(cox_regular)  # VIF < 5 = good
+
+# 4. Check cluster size adequacy
+cluster_summary <- cand_hx_list_episodes_grouping %>%
+  group_by(LISTING_CTR_CODE) %>%
+  summarise(
+    n_episodes = n(),
+    n_deaths = sum(death),
+    death_rate = mean(death)
+  ) %>%
+  arrange(n_episodes)
+
+summary(cluster_summary)
+
+# Count small clusters
+small_clusters <- cluster_summary %>%
+  filter(n_episodes < 10 | n_deaths < 5)
+print(paste0("Number of small clusters: ", nrow(small_clusters), " out of ", 
+             nrow(cluster_summary)))
+
+# 5. Compare fixed effects between models
+comparison <- data.frame(
+  Variable = names(coef(cox_regular)),
+  Regular_Cox = coef(cox_regular),
+  Mixed_Cox = fixef(second_model_death)
+)
+print(comparison)
+
+
+
+library(survival)
+library(coxme)
+library(dplyr)
+
+# 1. Identify adequate centers (≥10 episodes AND ≥5 deaths)
+adequate_centers <- cluster_summary %>%
+  filter(n_episodes >= 10, n_deaths >= 5) %>%
+  pull(LISTING_CTR_CODE)
+
+print(paste0("Adequate centers: ", length(adequate_centers), " out of 84"))
+
+# 2. Filter dataset to adequate centers only
+cand_adequate <- cand_hx_list_episodes_grouping %>%
+  filter(LISTING_CTR_CODE %in% adequate_centers)
+
+print(paste0("Original episodes: ", nrow(cand_hx_list_episodes_grouping)))
+print(paste0("Adequate center episodes: ", nrow(cand_adequate)))
+print(paste0("Deaths in adequate centers: ", sum(cand_adequate$death)))
+
+# 3. Refit model with adequate centers only
+model_sensitivity <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + 
+                            (1 | LISTING_CTR_CODE), 
+                           data = cand_adequate)
+
+# 4. Compare fixed effects (hazard ratios)
+comparison <- data.frame(
+  Variable = names(fixef(second_model_death)),
+  All_Centers_Coef = fixef(second_model_death),
+  All_Centers_HR = exp(fixef(second_model_death)),
+  Adequate_Centers_Coef = fixef(model_sensitivity),
+  Adequate_Centers_HR = exp(fixef(model_sensitivity)),
+  Percent_Change = (exp(fixef(model_sensitivity)) - exp(fixef(second_model_death))) / 
+                   exp(fixef(second_model_death)) * 100
+)
+
+print(comparison)
+
+# 5. Compare variance of random effects
+cat("\n=== Random Effect Variance ===\n")
+cat("All centers:", VarCorr(second_model_death)$LISTING_CTR_CODE[1], "\n")
+cat("Adequate centers:", VarCorr(model_sensitivity)$LISTING_CTR_CODE[1], "\n")
+
+# 6. Compare model summaries
+cat("\n=== Full Model Summary ===\n")
+print(summary(second_model_death))
+
+cat("\n=== Sensitivity Model Summary ===\n")
+print(summary(model_sensitivity))
+
+
+```
+
+
+
+``` {r Primary Model 2}
+
+third_model_death <- coxme(Surv(start, end, death) ~ STATUS_JUST + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+
+
+summary(third_model_death)
+exp(confint(third_model_death))
+
+third_plot_death = plot_model(
+  third_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  # axis.labels = c(
+  #   "Status (Ref 2): 1A",
+  #   "Status (Ref 2): 1B",
+  #   "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+
+```
+
+``` {r central illustration}
+
+#This takes the results of Primary Model 2 to create Central Illustration 
+
+# ============================================================================
+# Forest Plot for Primary Model 2 (Status 2 Reference)
+# ============================================================================
+
+library(tidyverse)
+
+# ============================================================================
+# Extract Model Results and Add Reference Category
+# ============================================================================
+
+results <- data.frame(
+  category = c(
+    "Status 2",  # Reference category
+    "Status 1B: Exception",
+    "Status 1B: Standard Listing",
+    "Status 1A: Exception",
+    "Status 1A: Congenital Heart Disease",
+    "Status 1A: Ductal-Dependent Circulation",
+    "Status 1A: MCS/IABP",
+    "Status 1A: Mechanical Ventilation"
+  ),
+  hr = c(
+    1.00,  # Reference
+    1.5274,
+    2.0300,
+    4.0820,
+    10.8083,
+    15.1575,
+    11.1448,
+    50.7471
+  ),
+  log_hr = c(
+    0,  # Reference
+    0.4236,
+    0.7080,
+    1.4066,
+    2.3803,
+    2.7185,
+    2.4110,
+    3.9269
+  ),
+  se = c(
+    0,  # Reference
+    0.2636,
+    0.2642,
+    0.2680,
+    0.1914,
+    0.2154,
+    0.1872,
+    0.1926
+  ),
+  p_value = c(
+    NA,  # Reference
+    0.10808,
+    0.00736,
+    1.53e-07,
+    2e-16,
+    2e-16,
+    2e-16,
+    2e-16
+  )
+) %>%
+  mutate(
+    # Calculate confidence intervals
+    ci_lower = exp(log_hr - 1.96 * se),
+    ci_upper = exp(log_hr + 1.96 * se),
+    # Format for display
+    hr_ci = ifelse(category == "Status 2",
+                   "1.00 (Reference)",
+                   sprintf("%.2f (%.2f, %.2f)", hr, ci_lower, ci_upper)),
+    # P-value formatting
+    p_formatted = case_when(
+      is.na(p_value) ~ "—",
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ sprintf("%.3f", p_value)
+    ),
+    # Clean category names
+    category_clean = str_replace(category, "Status 1A: ", "1A: "),
+    category_clean = str_replace(category_clean, "Status 1B: ", "1B: "),
+    # Add grouping
+    group = case_when(
+      str_detect(category, "Status 1A") ~ "Status 1A",
+      str_detect(category, "Status 1B") ~ "Status 1B",
+      str_detect(category, "Status 2") ~ "Status 2"
+    ),
+    # Order categories
+    order = c(1, 2, 3, 4, 5, 6, 7, 8)
+  ) %>%
+  arrange(order)
+
+# ============================================================================
+# Create Forest Plot Using ggplot2
+# ============================================================================
+
+forest_plot <- ggplot(results, aes(y = reorder(category_clean, -order))) +
+  
+  # Add reference line at HR = 1
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  
+  # Add confidence intervals
+  geom_errorbarh(
+    aes(xmin = ci_lower, xmax = ci_upper),
+    height = 0.2,
+    linewidth = 0.8,
+    color = "black"
+  ) +
+  
+  # Add point estimates
+  geom_point(
+    aes(x = hr, shape = group, fill = group),
+    size = 4,
+    color = "black"
+  ) +
+  
+  # Shapes and colors by status group
+  scale_shape_manual(
+    values = c("Status 1A" = 21, "Status 1B" = 22, "Status 2" = 24),
+    guide = "none"
+  ) +
+  
+  scale_fill_manual(
+    values = c("Status 1A" = "#d55e00", "Status 1B" = "#0072b2", "Status 2" = "#009e73"),
+    guide = "none"
+  ) +
+  
+  # Log scale for x-axis
+  scale_x_continuous(
+    trans = "log",
+    breaks = c(1, 2, 5, 10, 20, 50, 100),
+    labels = c("1", "2", "5", "10", "20", "50", "100"),
+    limits = c(0.5, 100)
+  ) +
+  
+  # Labels
+  labs(
+    x = "Hazard Ratio for Waitlist Mortality",
+    y = NULL,
+    title = "Association Between Listing Status/Indication and Waitlist Mortality",
+    subtitle = "Reference: Status 2"
+  ) +
+  
+  # Theme
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 11, face = "bold", margin = margin(t = 10)),
+    plot.title = element_text(size = 13, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, margin = margin(b = 10)),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.3),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+print(forest_plot)
+
+# ============================================================================
+# Add Text Annotations with HR and P-values
+# ============================================================================
+
+forest_plot_annotated <- forest_plot +
+  
+  # Add HR (95% CI) text to the right
+  geom_text(
+    aes(x = 90, label = hr_ci),
+    hjust = 0,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  
+  # Add p-values further right
+  geom_text(
+    aes(x = 120, label = p_formatted),
+    hjust = 0.5,
+    size = 3.5
+  ) +
+  
+  # Expand limits to accommodate text
+  coord_cartesian(xlim = c(0.5, 140), clip = "off") +
+  
+  # Add column headers
+  annotate("text", x = 90, y = 8.5, label = "HR (95% CI)", 
+           hjust = 0, fontface = "bold", size = 3.5) +
+  annotate("text", x = 120, y = 8.5, label = "P-value", 
+           hjust = 0.5, fontface = "bold", size = 3.5) +
+  
+  # Adjust plot margins to accommodate text
+  theme(plot.margin = margin(10, 100, 10, 10))
+
+print(forest_plot_annotated)
+
+
+``` 
+
+
+
+``` {r Primary Model 2 assumptions}
+
+library(survival)
+library(coxme)
+library(car)
+library(dplyr)
+
+# ===== 1. CHECK PROPORTIONAL HAZARDS =====
+# Fit Cox without random effects
+cox_no_re <- coxph(Surv(start, end, death) ~ STATUS_JUST, 
+                   data = cand_hx_list_episodes_grouping)
+
+ph_test <- cox.zph(cox_no_re)
+print(ph_test)  # p > 0.05 = assumption met
+plot(ph_test)   # Flat lines = good
+
+# ===== 2. CHECK NORMALITY OF RANDOM EFFECTS =====
+frailty_values <- ranef(third_model_death)$LISTING_CTR_CODE
+
+# QQ plot
+qqnorm(frailty_values, main = "Q-Q Plot of Center Random Effects")
+qqline(frailty_values, col = "red")
+
+# Shapiro-Wilk test
+shapiro_result <- shapiro.test(frailty_values)
+print(paste0("Shapiro-Wilk test p-value: ", round(shapiro_result$p.value, 3)))
+
+# Histogram
+hist(frailty_values, breaks = 20,
+     main = "Distribution of Center Random Effects",
+     xlab = "Random Effect (Frailty)")
+
+
+# ===== 4. CHECK CLUSTER SIZE ADEQUACY =====
+cluster_summary <- cand_hx_list_episodes_grouping %>%
+  group_by(LISTING_CTR_CODE) %>%
+  summarise(
+    n_episodes = n(),
+    n_deaths = sum(death),
+    death_rate = mean(death)
+  ) %>%
+  arrange(n_episodes)
+
+print(summary(cluster_summary))
+
+# Count small clusters
+small_clusters <- cluster_summary %>%
+  filter(n_episodes < 10 | n_deaths < 5)
+print(paste0("Small clusters: ", nrow(small_clusters), " out of ", nrow(cluster_summary)))
+
+# ===== 5. SENSITIVITY ANALYSIS - EXCLUDE SMALL CENTERS =====
+adequate_centers <- cluster_summary %>%
+  filter(n_episodes >= 10, n_deaths >= 5) %>%
+  pull(LISTING_CTR_CODE)
+
+print(paste0("Adequate centers: ", length(adequate_centers), " out of 84"))
+
+# Filter to adequate centers
+cand_adequate <- cand_hx_list_episodes_grouping %>%
+  filter(LISTING_CTR_CODE %in% adequate_centers)
+
+# Refit model
+model_sensitivity <- coxme(Surv(start, end, death) ~ STATUS_JUST + 
+                            (1 | LISTING_CTR_CODE), 
+                           data = cand_adequate)
+
+# Compare fixed effects
+comparison <- data.frame(
+  Variable = names(fixef(third_model_death)),
+  All_Centers_HR = exp(fixef(third_model_death)),
+  Adequate_Centers_HR = exp(fixef(model_sensitivity)),
+  Percent_Change = (exp(fixef(model_sensitivity)) - exp(fixef(third_model_death))) / 
+                   exp(fixef(third_model_death)) * 100
+)
+
+print("Fixed effects comparison:")
+print(comparison)
+
+
+
+```
+
+
+
+``` {r Per Status Model}
+
+#this simply stratifies Primary Model 1 by status
+
+
+# cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+#   mutate(
+#     EXCEPTION_STATUS = factor(EXCEPTION_STATUS, 
+#                               labels = c("Status 2", "Status 1B No Exception", "Status 1B Exception",
+#                                          "Status 1A No Exception", "Status 1A Exception")))
+cand_hx_list_episodes_grouping = cand_hx_list_episodes_grouping %>%
+  mutate(
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    diagnosis_dummy = case_when(
+      diagnosis == "Dilated Cardiomyopathy, Non-Ischemic" ~ "Dilated Cardiomyopathy",
+      diagnosis == "Congenital Heart Disease" ~ "Congenital Heart Disease",
+      diagnosis == "Re-Heart Transplant" ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis_dummy = factor(diagnosis_dummy, levels = c("Dilated Cardiomyopathy", "Congenital Heart Disease", "Re-Heart Transplant", "Other")))
+
+#Status 1A ONLY
+
+status1a <- cand_hx_list_episodes_grouping %>%
+  filter(STATUS == "1A")
+
+coxme_stat1a_death <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a)
+# coxme_stat1a_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1a)
+
+summary(coxme_stat1a_death)
+exp(confint(coxme_stat1a_death))
+# 
+# summary(coxme_stat1a_transplant)
+# exp(confint(coxme_stat1a_transplant))
+
+status1b <- cand_hx_list_episodes_grouping %>%
+  filter(STATUS == "1B")
+
+coxme_stat1b_death <- coxme(Surv(start, end, death) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b)
+# coxme_stat1b_transplant <- coxme(Surv(start, end, transplant) ~ EXCEPTION + (1 | LISTING_CTR_CODE), data = status1b)
+
+summary(coxme_stat1b_death)
+exp(confint(coxme_stat1b_death))
+# 
+# summary(coxme_stat1b_transplant)
+# exp(confint(coxme_stat1b_transplant))
+
+coxme_stats_ex <- plot_models(
+  coxme_stat1a_death,
+  coxme_stat1b_death,
+  axis.labels = "Exception",
+  m.labels = c("Status 1A", "Status 1B"),
+  value.size = 6,
+  # title = "Mixed Effects Model with Center Random Effects",
+  legend.title = "",
+  axis.title = "Hazard Ratio",
+  spacing = 1,
+  show.values = TRUE,
+  show.p = TRUE,
+  grid.breaks = c(0.1, 1, 10)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20)) +
+  geom_hline(yintercept = 1, linetype = "dotted", linewidth = 1, color = "black")
+
+
+```
+
+
+
+``` {r exception and diagnosis interaction}
+
+#This model adds to Primary Model 1 by including an interaction between exception and diagnosis
+
+fourth_model_death <- coxme(Surv(start, end, death) ~ STATUS + EXCEPTION + diagnosis_dummy + EXCEPTION * diagnosis_dummy + (1 | LISTING_CTR_CODE), data = cand_hx_list_episodes_grouping)
+
+
+summary(fourth_model_death)
+exp(confint(fourth_model_death))
+
+  
+  # ============================================================================
+# ANALYSIS: Exception Effect by Diagnosis Using emmeans
+# ============================================================================
+
+library(coxme)
+library(emmeans)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+# Your interaction model (already fitted)
+# fourth_model_death <- coxme(Surv(start, end, death) ~ STATUS + EXCEPTION + 
+#                              diagnosis_dummy + EXCEPTION * diagnosis_dummy + 
+#                              (1 | LISTING_CTR_CODE), 
+#                              data = cand_hx_list_episodes_grouping)
+
+# ----------------------------------------------------------------------------
+# Approach 1: Using emmeans (if it works with coxme)
+# ----------------------------------------------------------------------------
+
+# Try emmeans - may need to use mode = "linear.predictor"
+emm_results <- emmeans(fourth_model_death, 
+                       specs = ~ EXCEPTION | diagnosis_dummy,
+                       mode = "linear.predictor",
+                       type = "response")
+
+# Get contrasts (exception vs no exception within each diagnosis)
+exception_contrasts <- contrast(emm_results, 
+                                method = "pairwise",
+                                type = "response")
+
+# View results
+summary(exception_contrasts)
+
+# ----------------------------------------------------------------------------
+# Approach 2: Manual Calculation (More reliable for coxme)
+# ----------------------------------------------------------------------------
+
+# Extract coefficients and variance-covariance matrix
+coefs <- fixef(fourth_model_death)
+vcov_matrix <- vcov(fourth_model_death)
+
+# Calculate exception effect for each diagnosis
+# Reference (DCM): Just the main effect
+# CHD: main effect + interaction
+# Re-Tx: main effect + interaction  
+# Other: main effect + interaction
+
+# Create contrast matrix
+# Rows: DCM, CHD, Re-Tx, Other
+# Columns: coefficients in order from model
+
+# Get coefficient names
+names(coefs)
+
+# Manual calculation for each diagnosis
+calc_exception_hr <- function(main_effect, interaction_effect = 0, 
+                              vcov_matrix, main_idx, int_idx = NULL) {
+  
+  if(is.null(int_idx)) {
+    # Reference group (DCM)
+    log_hr <- main_effect
+    se <- sqrt(vcov_matrix[main_idx, main_idx])
+  } else {
+    # Other groups with interaction
+    log_hr <- main_effect + interaction_effect
+    # Variance: Var(A+B) = Var(A) + Var(B) + 2*Cov(A,B)
+    var <- vcov_matrix[main_idx, main_idx] + 
+           vcov_matrix[int_idx, int_idx] + 
+           2 * vcov_matrix[main_idx, int_idx]
+    se <- sqrt(var)
+  }
+  
+  hr <- exp(log_hr)
+  ci_lower <- exp(log_hr - 1.96 * se)
+  ci_upper <- exp(log_hr + 1.96 * se)
+  z <- log_hr / se
+  p_value <- 2 * pnorm(-abs(z))
+  
+  return(data.frame(
+    log_hr = log_hr,
+    hr = hr,
+    se = se,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    z = z,
+    p_value = p_value
+  ))
+}
+
+# Get coefficient indices
+exception_idx <- which(names(coefs) == "EXCEPTION")
+chd_int_idx <- which(names(coefs) == "EXCEPTION:diagnosis_dummyCongenital Heart Disease")
+retx_int_idx <- which(names(coefs) == "EXCEPTION:diagnosis_dummyRe-Heart Transplant")
+other_int_idx <- which(names(coefs) == "EXCEPTION:diagnosis_dummyOther")
+
+# Calculate for each diagnosis
+dcm_result <- calc_exception_hr(
+  main_effect = coefs[exception_idx],
+  vcov_matrix = vcov_matrix,
+  main_idx = exception_idx
+)
+
+chd_result <- calc_exception_hr(
+  main_effect = coefs[exception_idx],
+  interaction_effect = coefs[chd_int_idx],
+  vcov_matrix = vcov_matrix,
+  main_idx = exception_idx,
+  int_idx = chd_int_idx
+)
+
+retx_result <- calc_exception_hr(
+  main_effect = coefs[exception_idx],
+  interaction_effect = coefs[retx_int_idx],
+  vcov_matrix = vcov_matrix,
+  main_idx = exception_idx,
+  int_idx = retx_int_idx
+)
+
+other_result <- calc_exception_hr(
+  main_effect = coefs[exception_idx],
+  interaction_effect = coefs[other_int_idx],
+  vcov_matrix = vcov_matrix,
+  main_idx = exception_idx,
+  int_idx = other_int_idx
+)
+
+# Combine results
+diagnosis_results <- bind_rows(
+  dcm_result %>% mutate(diagnosis = "Dilated Cardiomyopathy"),
+  chd_result %>% mutate(diagnosis = "Congenital Heart Disease"),
+  retx_result %>% mutate(diagnosis = "Re-Heart Transplant"),
+  other_result %>% mutate(diagnosis = "Other")
+)
+
+# Add sample sizes (you'll need to calculate these from your data)
+# Get counts from your dataset
+diagnosis_counts <- cand_hx_list_episodes_grouping %>%
+  group_by(diagnosis_dummy) %>%
+  summarise(
+    n_patients = n_distinct(PX_ID),
+    n_deaths = sum(death, na.rm = TRUE)
+  )
+
+# Print results
+print(diagnosis_results)
+
+# ----------------------------------------------------------------------------
+# Likelihood Ratio Test for Interaction
+# ----------------------------------------------------------------------------
+
+# Fit model without interaction
+model_no_interaction <- coxme(Surv(start, end, death) ~ STATUS + EXCEPTION + 
+                               diagnosis_dummy + (1 | LISTING_CTR_CODE), 
+                               data = cand_hx_list_episodes_grouping)
+
+# Compare models
+lr_test <- anova(model_no_interaction, fourth_model_death)
+print(lr_test)
+
+# Extract p-value for interaction
+interaction_p <- lr_test[2, "P(>|Chi|)"]
+cat("\nInteraction p-value:", interaction_p, "\n")
+
+# ============================================================================
+# FIGURE: Forest Plot of Exception Effects by Diagnosis
+# ============================================================================
+
+# Prepare data for plotting
+plot_data <- diagnosis_results %>%
+  mutate(
+    diagnosis = factor(diagnosis, 
+                      levels = c("Other", "Re-Heart Transplant", 
+                                "Congenital Heart Disease", 
+                                "Dilated Cardiomyopathy")),
+    # Create label with HR and CI
+    label = sprintf("%.2f (%.2f-%.2f)", hr, ci_lower, ci_upper),
+    # Create p-value label
+    p_label = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# Add overall result from Primary Model 1
+overall_result <- data.frame(
+  diagnosis = factor("Overall (Primary Model 1)", 
+                    levels = c("Overall (Primary Model 1)", "Other", 
+                              "Re-Heart Transplant", "Congenital Heart Disease",
+                              "Dilated Cardiomyopathy")),
+  hr = 0.41,  # From your Primary Model 1
+  ci_lower = 0.31,
+  ci_upper = 0.55,
+  p_value = 0.001,
+  label = "0.41 (0.31-0.55)",
+  p_label = "***"
+)
+
+# Combine with diagnosis-specific results
+plot_data_full <- bind_rows(overall_result, plot_data) %>%
+  mutate(
+    diagnosis = factor(diagnosis, 
+                      levels = c("Overall (Primary Model 1)", "Other",
+                                "Re-Heart Transplant", "Congenital Heart Disease",
+                                "Dilated Cardiomyopathy"))
+  )
+
+# Create forest plot
+forest_plot <- ggplot(plot_data_full, aes(x = hr, y = diagnosis)) +
+  # Add vertical line at HR = 1
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  
+  # Add confidence intervals
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper), 
+                 height = 0.2, linewidth = 0.8, color = "black") +
+  
+  # Add point estimates
+  geom_point(aes(shape = diagnosis, fill = diagnosis), 
+             size = 4, color = "black") +
+  
+  # Styling for overall vs. subgroup
+  scale_shape_manual(values = c(23, 21, 21, 21, 21)) +  # Diamond for overall, circles for subgroups
+  scale_fill_manual(values = c("black", "#E69F00", "#56B4E9", "#009E73", "#CC79A7")) +
+  
+  # Add HR labels
+  geom_text(aes(label = label), 
+            hjust = 0, nudge_y = 0.25, size = 3.5, fontface = "bold") +
+  
+  # Add p-value stars
+  geom_text(aes(label = p_label, x = ci_upper), 
+            hjust = -1.5, size = 4) +
+  
+  # Scale and labels
+  scale_x_continuous(
+    trans = "log",
+    breaks = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5),
+    labels = c("0.1", "0.2", "0.3", "0.4", "0.5", "0.75", "1.0", "1.5"),
+    limits = c(0.1, 1.8)
+  ) +
+  
+  labs(
+    x = "Hazard Ratio for Exceptions",
+    y = NULL,
+    #title = "Association Between Status Exceptions and Waitlist Mortality",
+    #subtitle = sprintf("Stratified by Primary Diagnosis (Interaction p = %.3f)", interaction_p),
+    caption = "* p < 0.05, ** p < 0.01, *** p < 0.001"
+  ) +
+  
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 11, face = "bold", margin = margin(t = 10)),
+    plot.title = element_text(size = 13, face = "bold", hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, margin = margin(b = 10)),
+    plot.caption = element_text(size = 9, hjust = 0, margin = margin(t = 10)),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.3),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+print(forest_plot)
+
+interaction_p
+
+```
+
+
+
+
+``` {r sensitivity}
+
+# This plot adds demographics as a sensitivity analysis to Primary Model 1
+
+sensitivity_data = cand_hx_list_episodes_grouping %>%
+  mutate(
+    sex = ifelse(GENDER == "M", "Male", "Female"),
+    sex = factor(sex, levels = c("Male", "Female")),
+    race = case_when(
+      ETHCAT == 1 ~ "White",
+      ETHCAT == 2 ~ "Black",
+      ETHCAT == 4 ~ "Hispanic/Latino",
+      ETHCAT == 5 ~ "Asian",
+      TRUE ~ "Other"),
+    race = factor(race, levels = c("White", "Black", "Hispanic/Latino", "Asian", "Other")),
+    age_group = case_when(
+      INIT_AGE < 1 ~ "< 1",
+      INIT_AGE >= 1 & INIT_AGE < 5 ~ "1-4",
+      INIT_AGE >= 5 & INIT_AGE < 12 ~ "5-11",
+      INIT_AGE >= 12 ~ "> 12"),
+    age_group = factor(age_group, levels = c("< 1", "1-4", "5-11", "> 12")),
+    diagnosis = case_when(
+      TCR_DGN > 999 & TCR_DGN < 1007 ~ "Dilated Cardiomyopathy, Non-Ischemic",
+      TCR_DGN > 1049 & TCR_DGN < 1100 ~ "Restrictive Cardiomyopathy",
+      TCR_DGN == 1203 | (TCR_DGN >= 1205 & TCR_DGN <= 1207) ~ "Congenital Heart Disease",
+      TCR_DGN == 1201 ~ "Hypertrophic Cardiomyopathy",
+      TCR_DGN >= 1100 & TCR_DGN <= 1199 ~ "Re-Heart Transplant",
+      TRUE ~ "Other"),
+    diagnosis = factor(diagnosis, levels = c("Dilated Cardiomyopathy, Non-Ischemic", "Restrictive Cardiomyopathy", 
+                                             "Congenital Heart Disease", "Hypertrophic Cardiomyopathy", 
+                                             "Re-Heart Transplant", "Other")),
+    blood_type = factor(
+      case_when(
+        ABO %in% c("A", "A1", "A2") ~ "A",
+        ABO %in% c("A1B", "A2B") ~ "AB",
+        TRUE ~ ABO)),
+    ecmo = ifelse(ECMO_TCR == 1, 1, 0),
+    inotropes = ifelse(INOTROPES_TCR == 1, 1, 0),
+    vad = ifelse(VAD_DEVICE_TY_TCR == 2 | VAD_DEVICE_TY_TCR == 3 | VAD_DEVICE_TY_TCR == 5, 1, 0),
+    ventilator = ifelse(VENTILATOR_TCR == 1, 1, 0))
+    
+
+sensitivity_model_death <- coxme(Surv(start, end, death) ~ EXCEPTION + STATUS + sex + race + age_group + blood_type + diagnosis + (1 | LISTING_CTR_CODE), data = sensitivity_data)
+
+summary(sensitivity_model_death)
+exp(confint(sensitivity_model_death))
+
+
+sensitivity_plot_death = plot_model(
+  sensitivity_model_death,
+  show.values = TRUE,
+  value.offset = .3,
+  value.size = 6,
+  axis.labels = c("Dx: Other (Ref DCM)", "Dx: Re-Heart TX (Ref DCM)", "Dx: Hypertrophic Cardiomyopathy (Ref DCM)", "Dx: Congenital Heart Disease (Ref DCM)", "Dx: Restrictive Cardiomyopathy (Ref DCM)", "Blood Type: O (Ref A)", "Blood Type: B (Ref A)", "Blood Type: AB (Ref A)", "Age: 12 Years and Older (Ref < 1 Year)", "Age: 5-11 Years (Ref < 1 Year)", "Age: 1-4 Years (Ref < 1 Year)", "Race: Other (Ref White)", "Race: Asian (Ref White)", "Race: Hispanic/Latino (Ref White)", "Race: Black (Ref White)", "Sex: Female (Ref Male)", "Status: 1A (Ref 2)", "Status: 1B (Ref 2)", "Exception"),
+  title = "",
+  axis.title = "Hazard Ratio of Pre-Transplant Mortality",
+  grid.breaks = c(0.01, 0.1, 1, 10, 100)) +
+  theme_classic() +
+  theme(text = element_text(size = 20),
+        axis.text.x = element_text(size = 18),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+
+
+
+
+
+
+```
+
+
+
+
+
+
